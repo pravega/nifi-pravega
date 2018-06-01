@@ -16,6 +16,13 @@
  */
 package org.apache.nifi.processors.pravega;
 
+import io.pravega.client.ClientFactory;
+import io.pravega.client.admin.StreamManager;
+import io.pravega.client.stream.EventStreamWriter;
+import io.pravega.client.stream.EventWriterConfig;
+import io.pravega.client.stream.ScalingPolicy;
+import io.pravega.client.stream.StreamConfiguration;
+import io.pravega.client.stream.impl.ByteArraySerializer;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.annotation.behavior.ReadsAttribute;
@@ -34,11 +41,14 @@ import org.apache.nifi.processor.ProcessorInitializationContext;
 import org.apache.nifi.processor.Relationship;
 import org.apache.nifi.processor.util.StandardValidators;
 
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 
 @Tags({"example"})
 @CapabilityDescription("Provide a description")
@@ -96,8 +106,32 @@ public class PublishPravega extends AbstractProcessor {
         if ( flowFile == null ) {
             return;
         }
-        // TODO implement
         System.out.println("This is a custom processor that will receive flow file");
+        try {
+            URI controllerURI = new URI("tcp://10.246.21.230:9090");
+            StreamManager streamManager = StreamManager.create(controllerURI);
+            String scope = "nifitest1";
+            streamManager.createScope(scope);
+            String streamName = "fromnifi";
+            StreamConfiguration streamConfig = StreamConfiguration.builder()
+                .scalingPolicy(ScalingPolicy.fixed(2))
+                .build();
+            streamManager.createStream(scope, streamName, streamConfig);
+
+            ClientFactory clientFactory = ClientFactory.withScope(scope, controllerURI);
+            EventStreamWriter<byte[]> writer = clientFactory.createEventWriter(
+                streamName,
+                new ByteArraySerializer(),
+                EventWriterConfig.builder().build());
+
+            String routingKey = "";
+            byte[] message = String.format("this is time %d", System.currentTimeMillis()).getBytes(StandardCharsets.UTF_8);
+            final CompletableFuture writeFuture = writer.writeEvent(routingKey, message);
+            writeFuture.get();
+        }
+        catch (Exception e) {
+            throw new ProcessException(e);
+        }
 
         session.transfer(flowFile,MY_RELATIONSHIP);
     }
