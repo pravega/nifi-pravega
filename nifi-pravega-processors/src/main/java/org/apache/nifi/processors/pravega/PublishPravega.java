@@ -23,24 +23,22 @@ import io.pravega.client.stream.EventWriterConfig;
 import io.pravega.client.stream.ScalingPolicy;
 import io.pravega.client.stream.StreamConfiguration;
 import io.pravega.client.stream.impl.ByteArraySerializer;
+import org.apache.nifi.annotation.behavior.*;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.flowfile.FlowFile;
-import org.apache.nifi.annotation.behavior.ReadsAttribute;
-import org.apache.nifi.annotation.behavior.ReadsAttributes;
-import org.apache.nifi.annotation.behavior.WritesAttribute;
-import org.apache.nifi.annotation.behavior.WritesAttributes;
 import org.apache.nifi.annotation.lifecycle.OnScheduled;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.SeeAlso;
 import org.apache.nifi.annotation.documentation.Tags;
+import org.apache.nifi.processor.*;
 import org.apache.nifi.processor.exception.ProcessException;
-import org.apache.nifi.processor.AbstractProcessor;
-import org.apache.nifi.processor.ProcessContext;
-import org.apache.nifi.processor.ProcessSession;
-import org.apache.nifi.processor.ProcessorInitializationContext;
-import org.apache.nifi.processor.Relationship;
+import org.apache.nifi.processor.io.InputStreamCallback;
+import org.apache.nifi.processor.util.FlowFileFilters;
 import org.apache.nifi.processor.util.StandardValidators;
+import org.apache.nifi.stream.io.StreamUtils;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -49,26 +47,33 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
-@Tags({"example"})
-@CapabilityDescription("Provide a description")
+@Tags({"Pravega", "Put", "Send", "Message"})
+@CapabilityDescription("Sends the contents of a FlowFile as a message to Pravega.")
+@InputRequirement(InputRequirement.Requirement.INPUT_REQUIRED)
 @SeeAlso({})
 @ReadsAttributes({@ReadsAttribute(attribute="", description="")})
 @WritesAttributes({@WritesAttribute(attribute="", description="")})
 public class PublishPravega extends AbstractProcessor {
 
     public static final PropertyDescriptor MY_PROPERTY = new PropertyDescriptor
-            .Builder().name("MY_PROPERTY")
-            .displayName("My property")
-            .description("Example Property")
-            .required(true)
-            .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
-            .build();
+        .Builder().name("MY_PROPERTY")
+        .displayName("My property")
+        .description("Example Property")
+        .required(true)
+        .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
+        .build();
 
-    public static final Relationship MY_RELATIONSHIP = new Relationship.Builder()
-            .name("MY_RELATIONSHIP")
-            .description("Example relationship")
-            .build();
+    static final Relationship REL_SUCCESS = new Relationship.Builder()
+        .name("success")
+        .description("FlowFiles for which all content was sent to Pravega.")
+        .build();
+
+    static final Relationship REL_FAILURE = new Relationship.Builder()
+        .name("failure")
+        .description("Any FlowFile that cannot be sent to Pravega will be routed to this Relationship")
+        .build();
 
     private List<PropertyDescriptor> descriptors;
 
@@ -81,7 +86,8 @@ public class PublishPravega extends AbstractProcessor {
         this.descriptors = Collections.unmodifiableList(descriptors);
 
         final Set<Relationship> relationships = new HashSet<Relationship>();
-        relationships.add(MY_RELATIONSHIP);
+        relationships.add(REL_SUCCESS);
+        relationships.add(REL_FAILURE);
         this.relationships = Collections.unmodifiableSet(relationships);
     }
 
@@ -102,21 +108,25 @@ public class PublishPravega extends AbstractProcessor {
 
     @Override
     public void onTrigger(final ProcessContext context, final ProcessSession session) throws ProcessException {
-        FlowFile flowFile = session.get();
-        if ( flowFile == null ) {
+        System.out.println("PublishPravega.onTrigger: BEGIN");
+
+        final List<FlowFile> flowFiles = session.get(FlowFileFilters.newSizeBasedFilter(250, DataUnit.KB, 500));
+        if (flowFiles.isEmpty()) {
             return;
         }
-        System.out.println("This is a custom processor that will receive flow file");
+
         try {
             URI controllerURI = new URI("tcp://10.246.21.230:9090");
-            StreamManager streamManager = StreamManager.create(controllerURI);
             String scope = "nifitest1";
-            streamManager.createScope(scope);
             String streamName = "fromnifi";
-            StreamConfiguration streamConfig = StreamConfiguration.builder()
-                .scalingPolicy(ScalingPolicy.fixed(2))
-                .build();
-            streamManager.createStream(scope, streamName, streamConfig);
+            if (false) {
+                StreamManager streamManager = StreamManager.create(controllerURI);
+                streamManager.createScope(scope);
+                StreamConfiguration streamConfig = StreamConfiguration.builder()
+                        .scalingPolicy(ScalingPolicy.fixed(2))
+                        .build();
+                streamManager.createStream(scope, streamName, streamConfig);
+            }
 
             ClientFactory clientFactory = ClientFactory.withScope(scope, controllerURI);
             EventStreamWriter<byte[]> writer = clientFactory.createEventWriter(
@@ -124,15 +134,37 @@ public class PublishPravega extends AbstractProcessor {
                 new ByteArraySerializer(),
                 EventWriterConfig.builder().build());
 
-            String routingKey = "";
-            byte[] message = String.format("this is time %d", System.currentTimeMillis()).getBytes(StandardCharsets.UTF_8);
-            final CompletableFuture writeFuture = writer.writeEvent(routingKey, message);
-            writeFuture.get();
+            for (final FlowFile flowFile : flowFiles) {
+                if (!isScheduled()) {
+                    // If stopped, re-queue FlowFile instead of sending it
+                    session.transfer(flowFile);
+                    continue;
+                }
+
+                // do the read
+                final byte[] messageContent = new byte[(int) flowFile.getSize()];
+                session.read(flowFile, new InputStreamCallback() {
+                    @Override
+                    public void process(final InputStream in) throws IOException {
+                        StreamUtils.fillBuffer(in, messageContent, true);
+                    }
+                });
+
+                String routingKey = "";
+                final CompletableFuture writeFuture = writer.writeEvent(routingKey, messageContent);
+                writeFuture.get();
+            }
+            writer.close();
+            clientFactory.close();
         }
         catch (Exception e) {
             throw new ProcessException(e);
         }
 
-        session.transfer(flowFile,MY_RELATIONSHIP);
+        // Transfer any successful FlowFiles.
+        for (FlowFile success : flowFiles) {
+            session.transfer(success, REL_SUCCESS);
+        }
+        System.out.println("PublishPravega.onTrigger: END");
     }
 }
