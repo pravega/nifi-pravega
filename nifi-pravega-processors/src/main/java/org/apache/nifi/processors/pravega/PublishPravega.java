@@ -58,6 +58,7 @@ import java.util.concurrent.CompletableFuture;
 public class PublishPravega extends AbstractProcessor {
     protected ComponentLog logger;
     protected EventStreamWriter<byte[]> cachedWriter;
+    protected ClientFactory cachedClientFactory;
 
     static final PropertyDescriptor PROP_CONTROLLER = new PropertyDescriptor.Builder()
             .name("controller")
@@ -137,6 +138,10 @@ public class PublishPravega extends AbstractProcessor {
                 cachedWriter.close();
                 cachedWriter = null;
             }
+            if (cachedClientFactory != null) {
+                cachedClientFactory.close();
+                cachedClientFactory = null;
+            }
         }
     }
 
@@ -152,6 +157,8 @@ public class PublishPravega extends AbstractProcessor {
 
         try {
             EventStreamWriter<byte[]> writer = getWriter(context);
+
+            // TODO: use transaction
 
             for (final FlowFile flowFile : flowFiles) {
                 if (!isScheduled()) {
@@ -176,7 +183,6 @@ public class PublishPravega extends AbstractProcessor {
                 logger.info("routingKey={}, size={}, messageContent={}",
                         new Object[]{routingKey, flowFile.getSize(), new String(messageContent)});
 
-                // TODO: get routing key from attribute
                 final CompletableFuture writeFuture = writer.writeEvent(routingKey, messageContent);
                 // TODO: only do wait after all messages have been sent.
                 writeFuture.get();
@@ -212,14 +218,12 @@ public class PublishPravega extends AbstractProcessor {
                     streamManager.createStream(scope, streamName, streamConfig);
                     streamManager.close();
 
-                    // TODO: do I need to close clientFactory?
-                    ClientFactory clientFactory = ClientFactory.withScope(scope, controllerURI);
-                    EventStreamWriter<byte[]> writer = clientFactory.createEventWriter(
+                    cachedClientFactory = ClientFactory.withScope(scope, controllerURI);
+                    cachedWriter = cachedClientFactory.createEventWriter(
                             streamName,
                             new ByteArraySerializer(),
                             EventWriterConfig.builder().build());
-                    cachedWriter = writer;
-                    return writer;
+                    return cachedWriter;
                 } catch (Exception e) {
                     logger.error(e.getMessage());
                     throw new RuntimeException(e);
