@@ -51,6 +51,7 @@ import java.util.concurrent.TimeUnit;
 @Tags({"Pravega", "Nautilus", "Get", "Ingest", "Ingress", "Receive", "Consume", "Subscribe", "Stream"})
 @CapabilityDescription("Consumes events from Pravega.")
 @InputRequirement(InputRequirement.Requirement.INPUT_FORBIDDEN)
+@SupportsBatching
 @SeeAlso({PublishPravega.class})
 public class ConsumePravega extends AbstractPravegaProcessor {
 
