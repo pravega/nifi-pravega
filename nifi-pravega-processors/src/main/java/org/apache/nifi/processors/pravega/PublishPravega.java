@@ -38,6 +38,7 @@ import org.apache.nifi.components.ValidationContext;
 import org.apache.nifi.components.ValidationResult;
 import org.apache.nifi.components.Validator;
 import org.apache.nifi.flowfile.FlowFile;
+import org.apache.nifi.flowfile.attributes.CoreAttributes;
 import org.apache.nifi.logging.ComponentLog;
 import org.apache.nifi.processor.AbstractProcessor;
 import org.apache.nifi.processor.DataUnit;
@@ -55,6 +56,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -187,8 +189,8 @@ public class PublishPravega extends AbstractProcessor {
         final Transaction<byte[]> transaction = writer.beginTxn();
         final UUID txnId = transaction.getTxnId();
 
-        logger.info("Sending {} messages in transaction {} to Pravega stream {}.",
-                new Object[]{flowFiles.size(), txnId, transitUri});
+        logger.info("Sending {} messages to Pravega stream {} in transaction {}.",
+                new Object[]{flowFiles.size(), transitUri, txnId});
 
         try {
             for (final FlowFile flowFile : flowFiles) {
@@ -213,34 +215,58 @@ public class PublishPravega extends AbstractProcessor {
                     }
                 });
 
-                logger.debug("routingKey={}, size={}, messageContent={}",
-                        new Object[]{routingKey, flowFile.getSize(), messageContent});
+                if (logger.isDebugEnabled()) {
+                    final String flowFileUUID = flowFile.getAttribute(CoreAttributes.UUID.key());
+                    logger.debug("routingKey={}, size={}, flowFileUUID={}",
+                            new Object[]{routingKey, flowFile.getSize(), flowFileUUID});
+                    if (logger.isTraceEnabled()) {
+                        logger.debug("messageContentStr={}, messageContent={}", new Object[]{
+                                new String(messageContent, StandardCharsets.UTF_8), messageContent});
+                    }
+                }
 
                 // Write to Pravega.
                 transaction.writeEvent(routingKey, messageContent);
             }
-            transaction.commit();
+            // Flush all events to Pravega's durable storage.
+            // This will block until done.
+            // It will not commit the transaction.
+            transaction.flush();
         }
         catch (TxnFailedException e) {
             logger.error(e.getMessage());
             // Transfer the FlowFiles to the failure relationship.
-            // The user can choose to route this back to this processor for retry.
+            // The user can choose to route the FlowFiles back to this processor for retry
+            // or they can route them to an alternate processor.
             session.transfer(flowFiles, REL_FAILURE);
             return;
         }
 
         final long transmissionMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTime);
 
-        logger.info("Sent {} messages in {} milliseconds to Pravega stream {} in transaction {}.",
-                new Object[]{flowFiles.size(), transmissionMillis, transitUri, txnId});
-
-        // Transfer any successful FlowFiles.
+        // Transfer the FlowFiles to the success relationship.
         for (FlowFile flowFile : flowFiles) {
             session.getProvenanceReporter().send(flowFile, transitUri, transmissionMillis);
             session.transfer(flowFile, REL_SUCCESS);
         }
 
-        logger.debug("PublishPravega.onTrigger: END");
+        // Now we can commit the Pravega transaction.
+        // If an error occurs, we must rollback the NiFi session because we have already transferred
+        // FlowFiles to the success relationship. We then transfer the FlowFiles to the failure relationship.
+        try {
+            transaction.commit();
+        } catch (TxnFailedException e) {
+            logger.error(e.getMessage());
+            session.rollback();
+            session.transfer(flowFiles, REL_FAILURE);
+            return;
+        }
+
+        // Commit the NiFi session so that the following log message indicates complete success.
+        session.commit();
+
+        logger.info("Sent {} messages in {} milliseconds to Pravega stream {} in transaction {}.",
+                new Object[]{flowFiles.size(), transmissionMillis, transitUri, txnId});
     }
 
     /**
