@@ -25,13 +25,18 @@ import io.pravega.client.stream.StreamConfiguration;
 import io.pravega.client.stream.Transaction;
 import io.pravega.client.stream.TxnFailedException;
 import io.pravega.client.stream.impl.ByteArraySerializer;
-import org.apache.nifi.annotation.behavior.*;
+import org.apache.nifi.annotation.behavior.EventDriven;
+import org.apache.nifi.annotation.behavior.InputRequirement;
+import org.apache.nifi.annotation.behavior.ReadsAttribute;
+import org.apache.nifi.annotation.behavior.ReadsAttributes;
+import org.apache.nifi.annotation.behavior.SupportsBatching;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
-import org.apache.nifi.annotation.documentation.SeeAlso;
 import org.apache.nifi.annotation.documentation.Tags;
-import org.apache.nifi.annotation.lifecycle.OnScheduled;
 import org.apache.nifi.annotation.lifecycle.OnStopped;
 import org.apache.nifi.components.PropertyDescriptor;
+import org.apache.nifi.components.ValidationContext;
+import org.apache.nifi.components.ValidationResult;
+import org.apache.nifi.components.Validator;
 import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.logging.ComponentLog;
 import org.apache.nifi.processor.AbstractProcessor;
@@ -49,31 +54,42 @@ import org.apache.nifi.stream.io.StreamUtils;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
-@Tags({"Pravega", "Put", "Send", "Message"})
-@CapabilityDescription("Sends the contents of a FlowFile as a message to Pravega.")
+@Tags({"Pravega", "Nautilus", "Put", "Send", "Publish"})
+@CapabilityDescription("Sends the contents of a FlowFile as an event to Pravega.")
 @InputRequirement(InputRequirement.Requirement.INPUT_REQUIRED)
 @EventDriven
 @SupportsBatching
-@SeeAlso({})
-@ReadsAttributes({@ReadsAttribute(attribute="pravega.routing.key", description="The Pravega routing key")})
-@WritesAttributes({@WritesAttribute(attribute="", description="")})
+@ReadsAttributes({@ReadsAttribute(attribute=PublishPravega.ATTR_ROUTING_KEY, description="The Pravega routing key")})
 public class PublishPravega extends AbstractProcessor {
-    protected ComponentLog logger;
-    protected EventStreamWriter<byte[]> cachedWriter;
-    protected ClientFactory cachedClientFactory;
+    static final String ATTR_ROUTING_KEY = "pravega.routing.key";
+
+    static final Validator CONTROLLER_VALIDATOR = new Validator() {
+        @Override
+        public ValidationResult validate(String subject, String input, ValidationContext context) {
+            try{
+                final URI controllerURI = new URI(input);
+            } catch (URISyntaxException e) {
+                return new ValidationResult.Builder().subject(subject).valid(false).explanation("it is not valid URI syntax.").build();
+            }
+            return new ValidationResult.Builder().subject(subject).valid(true).build();
+        }
+    };
 
     static final PropertyDescriptor PROP_CONTROLLER = new PropertyDescriptor.Builder()
             .name("controller")
             .displayName("Pravega Controller URI")
             .description("The URI of the Pravega controller (e.g. tcp://localhost:9090).")
             .required(true)
-            .addValidator(StandardValidators.NON_BLANK_VALIDATOR)
+            .addValidator(CONTROLLER_VALIDATOR)
             .build();
 
     static final PropertyDescriptor PROP_SCOPE = new PropertyDescriptor.Builder()
@@ -93,23 +109,25 @@ public class PublishPravega extends AbstractProcessor {
             .build();
 
     static final Relationship REL_SUCCESS = new Relationship.Builder()
-        .name("success")
-        .description("FlowFiles for which all content was sent to Pravega.")
-        .build();
+            .name("success")
+            .description("FlowFiles for which all content was sent to Pravega.")
+            .build();
 
     static final Relationship REL_FAILURE = new Relationship.Builder()
-        .name("failure")
-        .description("Any FlowFile that cannot be sent to Pravega will be routed to this Relationship.")
-        .build();
+            .name("failure")
+            .description("Any FlowFile that cannot be sent to Pravega will be routed to this Relationship.")
+            .build();
+
+    ComponentLog logger;
+    EventStreamWriter<byte[]> cachedWriter;
+    ClientFactory cachedClientFactory;
 
     private List<PropertyDescriptor> descriptors;
-
     private Set<Relationship> relationships;
 
     @Override
     protected void init(final ProcessorInitializationContext context) {
         logger = getLogger();
-        logger.info("PublishPravega.init");
 
         final List<PropertyDescriptor> descriptors = new ArrayList<PropertyDescriptor>();
         descriptors.add(PROP_CONTROLLER);
@@ -136,7 +154,7 @@ public class PublishPravega extends AbstractProcessor {
     @OnStopped
     public void onStop(final ProcessContext context) {
         synchronized (this) {
-            logger.info("PublishPravega.onStop");
+            logger.debug("PublishPravega.onStop");
             if (cachedWriter != null) {
                 cachedWriter.close();
                 cachedWriter = null;
@@ -150,25 +168,38 @@ public class PublishPravega extends AbstractProcessor {
 
     @Override
     public void onTrigger(final ProcessContext context, final ProcessSession session) throws ProcessException {
-        logger.info("PublishPravega.onTrigger: BEGIN");
+        logger.debug("PublishPravega.onTrigger: BEGIN");
 
-        final List<FlowFile> flowFiles = session.get(FlowFileFilters.newSizeBasedFilter(250, DataUnit.KB, 500));
+        final double maxKiBInTransaction = 1024.0;
+        final int maxEventsInTransaction = 1000;
+        final List<FlowFile> flowFiles = session.get(FlowFileFilters.newSizeBasedFilter(
+                maxKiBInTransaction, DataUnit.KB, maxEventsInTransaction));
         if (flowFiles.isEmpty()) {
             return;
         }
 
-        try {
-            EventStreamWriter<byte[]> writer = getWriter(context);
-            Transaction<byte[]> transaction = writer.beginTxn();
+        final String controller = context.getProperty(PROP_CONTROLLER).getValue();
+        final String scope = context.getProperty(PROP_SCOPE).getValue();
+        final String streamName = context.getProperty(PROP_STREAM).getValue();
+        final String transitUri = buildTransitURI(controller, scope, streamName);
+        final long startTime = System.nanoTime();
+        final EventStreamWriter<byte[]> writer = getWriter(context);
+        final Transaction<byte[]> transaction = writer.beginTxn();
+        final UUID txnId = transaction.getTxnId();
 
+        logger.info("Sending {} messages in transaction {} to Pravega stream {}.",
+                new Object[]{flowFiles.size(), txnId, transitUri});
+
+        try {
             for (final FlowFile flowFile : flowFiles) {
                 if (!isScheduled()) {
                     // If stopped, re-queue FlowFile instead of sending it
                     session.transfer(flowFile);
+                    transaction.abort();
                     continue;
                 }
 
-                String routingKey = flowFile.getAttribute("pravega.routing.key");
+                String routingKey = flowFile.getAttribute(ATTR_ROUTING_KEY);
                 if (routingKey == null) {
                     routingKey = "";
                 }
@@ -183,7 +214,7 @@ public class PublishPravega extends AbstractProcessor {
                 });
 
                 logger.debug("routingKey={}, size={}, messageContent={}",
-                        new Object[]{routingKey, flowFile.getSize(), new String(messageContent)});
+                        new Object[]{routingKey, flowFile.getSize(), messageContent});
 
                 // Write to Pravega.
                 transaction.writeEvent(routingKey, messageContent);
@@ -198,28 +229,41 @@ public class PublishPravega extends AbstractProcessor {
             return;
         }
 
+        final long transmissionMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTime);
+
+        logger.info("Sent {} messages in {} milliseconds to Pravega stream {} in transaction {}.",
+                new Object[]{flowFiles.size(), transmissionMillis, transitUri, txnId});
+
         // Transfer any successful FlowFiles.
-        for (FlowFile success : flowFiles) {
-            session.transfer(success, REL_SUCCESS);
+        for (FlowFile flowFile : flowFiles) {
+            session.getProvenanceReporter().send(flowFile, transitUri, transmissionMillis);
+            session.transfer(flowFile, REL_SUCCESS);
         }
-        // TODO: update provenance
-        // TODO: log message count and rate
-        logger.info("PublishPravega.onTrigger: END");
+
+        logger.debug("PublishPravega.onTrigger: END");
+    }
+
+    /**
+     * Builds transit URI for provenance event. The transit URI will be in the form of
+     * tcp://localhost:9090/scope/stream.
+     */
+    static String buildTransitURI(String controller, String scope, String streamName) {
+        return String.format("%s/%s/%s", controller, scope, streamName);
     }
 
     protected EventStreamWriter<byte[]> getWriter(ProcessContext context) {
         synchronized (this) {
             if (cachedWriter == null) {
                 try {
-                    URI controllerURI = new URI(context.getProperty(PROP_CONTROLLER).getValue());
-                    String scope = context.getProperty(PROP_SCOPE).getValue();
-                    String streamName = context.getProperty(PROP_STREAM).getValue();
+                    final URI controllerURI = new URI(context.getProperty(PROP_CONTROLLER).getValue());
+                    final String scope = context.getProperty(PROP_SCOPE).getValue();
+                    final String streamName = context.getProperty(PROP_STREAM).getValue();
 
-                    // TODO: create stream only if property allows it.
-                    StreamManager streamManager = StreamManager.create(controllerURI);
+                    // TODO: Create scope and stream based on additional properties.
+                    final StreamManager streamManager = StreamManager.create(controllerURI);
                     streamManager.createScope(scope);
-                    StreamConfiguration streamConfig = StreamConfiguration.builder()
-                            .scalingPolicy(ScalingPolicy.fixed(2))
+                    final StreamConfiguration streamConfig = StreamConfiguration.builder()
+                            .scalingPolicy(ScalingPolicy.fixed(1))
                             .build();
                     streamManager.createStream(scope, streamName, streamConfig);
                     streamManager.close();
@@ -230,7 +274,7 @@ public class PublishPravega extends AbstractProcessor {
                             new ByteArraySerializer(),
                             EventWriterConfig.builder().build());
                     return cachedWriter;
-                } catch (Exception e) {
+                } catch (URISyntaxException e) {
                     logger.error(e.getMessage());
                     throw new RuntimeException(e);
                 }
