@@ -31,6 +31,7 @@ import org.apache.nifi.annotation.behavior.ReadsAttribute;
 import org.apache.nifi.annotation.behavior.ReadsAttributes;
 import org.apache.nifi.annotation.behavior.SupportsBatching;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
+import org.apache.nifi.annotation.documentation.SeeAlso;
 import org.apache.nifi.annotation.documentation.Tags;
 import org.apache.nifi.annotation.lifecycle.OnStopped;
 import org.apache.nifi.components.PropertyDescriptor;
@@ -57,12 +58,13 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
-@Tags({"Pravega", "Nautilus", "Put", "Send", "Publish"})
+@Tags({"Pravega", "Nautilus", "Put", "Send", "Publish", "Stream"})
 @CapabilityDescription("Sends the contents of a FlowFile as an event to Pravega.")
 @InputRequirement(InputRequirement.Requirement.INPUT_REQUIRED)
 @EventDriven
 @SupportsBatching
 @ReadsAttributes({@ReadsAttribute(attribute=PublishPravega.ATTR_ROUTING_KEY, description="The Pravega routing key")})
+@SeeAlso({ConsumePravega.class})
 public class PublishPravega extends AbstractPravegaProcessor {
     static final String ATTR_ROUTING_KEY = "pravega.routing.key";
 
