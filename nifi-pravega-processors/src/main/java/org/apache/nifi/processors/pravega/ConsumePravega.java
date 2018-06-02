@@ -25,14 +25,12 @@ import org.apache.nifi.annotation.behavior.*;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.SeeAlso;
 import org.apache.nifi.annotation.documentation.Tags;
+import org.apache.nifi.annotation.lifecycle.OnScheduled;
 import org.apache.nifi.annotation.lifecycle.OnStopped;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.flowfile.attributes.CoreAttributes;
-import org.apache.nifi.processor.DataUnit;
-import org.apache.nifi.processor.ProcessContext;
-import org.apache.nifi.processor.ProcessSession;
-import org.apache.nifi.processor.Relationship;
+import org.apache.nifi.processor.*;
 import org.apache.nifi.processor.exception.ProcessException;
 import org.apache.nifi.processor.io.InputStreamCallback;
 import org.apache.nifi.processor.io.OutputStreamCallback;
@@ -46,6 +44,9 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 @Tags({"Pravega", "Nautilus", "Get", "Ingest", "Ingress", "Receive", "Consume", "Subscribe", "Stream"})
@@ -62,6 +63,9 @@ public class ConsumePravega extends AbstractPravegaProcessor {
 
     ClientFactory cachedClientFactory;
     EventStreamReader<byte[]> cachedReader;
+    String readerGroupName;
+    ReaderGroup readerGroup;
+    ScheduledExecutorService scheduler;
 
     private static final List<PropertyDescriptor> descriptors;
     private static final Set<Relationship> relationships;
@@ -83,6 +87,21 @@ public class ConsumePravega extends AbstractPravegaProcessor {
     @Override
     public final List<PropertyDescriptor> getSupportedPropertyDescriptors() {
         return descriptors;
+    }
+
+    @Override
+    protected void init(final ProcessorInitializationContext context) {
+        super.init(context);
+        scheduler = Executors.newScheduledThreadPool(1);
+    }
+
+    @OnScheduled
+    public void onScheduled(final ProcessContext context) {
+        synchronized (this) {
+            // TODO: must coordinate reader group name across cluster.
+            readerGroupName = UUID.randomUUID().toString().replace("-", "");
+            logger.debug("readerGroupName={}", new Object[]{readerGroupName});
+        }
     }
 
     @OnStopped
@@ -116,9 +135,9 @@ public class ConsumePravega extends AbstractPravegaProcessor {
         try {
             while (true) {
                 final EventRead<byte[]> event = reader.readNextEvent(READER_TIMEOUT_MS);
-                if (event == null) {
-                    break;
-                }
+//                if (event == null) {
+//                    break;
+//                }
                 if (event.getEvent() == null) {
                     break;
                 }
@@ -153,6 +172,19 @@ public class ConsumePravega extends AbstractPravegaProcessor {
 
         logger.info("Received {} events in {} milliseconds from Pravega stream {}.",
                 new Object[]{eventCount, transmissionMillis, transitUri});
+
+        if (false) {
+            final String checkpointName = UUID.randomUUID().toString();
+            logger.debug("Calling initiateCheckpoint");
+            CompletableFuture<Checkpoint> checkpointFuture = readerGroup.initiateCheckpoint(checkpointName, scheduler);
+            checkpointFuture.thenAccept((Checkpoint checkpoint) -> {
+                logger.debug("checkpoint={}", new Object[]{checkpoint});
+            });
+        }
+//        Map<Stream, StreamCut> streamCuts = readerGroup.getStreamCuts();
+//        logger.info("streamCuts={}", new Object[]{streamCuts});
+
+        logger.debug("ConsumePravega.onTrigger: END");
     }
 
     protected EventStreamReader<byte[]> getReader(ProcessContext context) {
@@ -169,15 +201,15 @@ public class ConsumePravega extends AbstractPravegaProcessor {
                 final StreamConfiguration streamConfig = StreamConfiguration.builder()
                         .scalingPolicy(ScalingPolicy.fixed(1))
                         .build();
+                // TODO: get latest stream cut
                 final ReaderGroupConfig readerGroupConfig = ReaderGroupConfig.builder()
-                        .stream(Stream.of(scope, streamName))
+                        .stream(Stream.of(scope, streamName), StreamCut.UNBOUNDED)
+                        .disableAutomaticCheckpoints()
                         .build();
-                // TODO: must coordinate reader group across cluster.
-                final String readerGroup = UUID.randomUUID().toString().replace("-", "");
                 final String readerId = getIdentifier();
 
                 logger.info("Using reader group {}, reader ID {} to read from Pravega stream {}/{}.",
-                        new Object[]{readerGroup, readerId, scope, streamName});
+                        new Object[]{readerGroupName, readerId, scope, streamName});
 
                 // TODO: Create scope and stream based on additional properties.
                 try (final StreamManager streamManager = StreamManager.create(controllerURI)) {
@@ -186,13 +218,14 @@ public class ConsumePravega extends AbstractPravegaProcessor {
                 }
 
                 try (ReaderGroupManager readerGroupManager = ReaderGroupManager.withScope(scope, controllerURI)) {
-                    readerGroupManager.createReaderGroup(readerGroup, readerGroupConfig);
+                    readerGroupManager.createReaderGroup(readerGroupName, readerGroupConfig);
+                    readerGroup = readerGroupManager.getReaderGroup(readerGroupName);
                 }
 
                 final ClientFactory clientFactory = ClientFactory.withScope(scope, controllerURI);
                 final EventStreamReader<byte[]> reader = clientFactory.createReader(
                         readerId,
-                        readerGroup,
+                        readerGroupName,
                         new ByteArraySerializer(),
                         ReaderConfig.builder().build());
 
