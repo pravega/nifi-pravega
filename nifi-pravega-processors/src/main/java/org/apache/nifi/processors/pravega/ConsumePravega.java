@@ -1,27 +1,14 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with
- * this work for additional information regarding copyright ownership.
- * The ASF licenses this file to You under the Apache License, Version 2.0
- * (the "License"); you may not use this file except in compliance with
- * the License.  You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
 package org.apache.nifi.processors.pravega;
 
 import io.pravega.client.ClientFactory;
 import io.pravega.client.admin.ReaderGroupManager;
 import io.pravega.client.admin.StreamManager;
+import io.pravega.client.batch.BatchClient;
+import io.pravega.client.batch.StreamInfo;
 import io.pravega.client.stream.*;
 import io.pravega.client.stream.impl.ByteArraySerializer;
-import org.apache.nifi.annotation.behavior.*;
+import org.apache.nifi.annotation.behavior.InputRequirement;
+import org.apache.nifi.annotation.behavior.SupportsBatching;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.SeeAlso;
 import org.apache.nifi.annotation.documentation.Tags;
@@ -29,20 +16,17 @@ import org.apache.nifi.annotation.lifecycle.OnScheduled;
 import org.apache.nifi.annotation.lifecycle.OnStopped;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.flowfile.FlowFile;
-import org.apache.nifi.flowfile.attributes.CoreAttributes;
-import org.apache.nifi.processor.*;
+import org.apache.nifi.processor.ProcessContext;
+import org.apache.nifi.processor.ProcessSession;
+import org.apache.nifi.processor.ProcessorInitializationContext;
+import org.apache.nifi.processor.Relationship;
 import org.apache.nifi.processor.exception.ProcessException;
-import org.apache.nifi.processor.io.InputStreamCallback;
 import org.apache.nifi.processor.io.OutputStreamCallback;
-import org.apache.nifi.processor.util.FlowFileFilters;
-import org.apache.nifi.stream.io.StreamUtils;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
@@ -55,6 +39,8 @@ import java.util.concurrent.TimeUnit;
 @SupportsBatching
 @SeeAlso({PublishPravega.class})
 public class ConsumePravega extends AbstractPravegaProcessor {
+
+    // TODO: allow concurrent tasks for this processor
 
     static final Relationship REL_SUCCESS = new Relationship.Builder()
             .name("success")
@@ -99,6 +85,7 @@ public class ConsumePravega extends AbstractPravegaProcessor {
     public void onScheduled(final ProcessContext context) {
         synchronized (this) {
             // TODO: must coordinate reader group name across cluster.
+            // TODO: must also create a new reader group.
             readerGroupName = UUID.randomUUID().toString().replace("-", "");
             logger.debug("readerGroupName={}", new Object[]{readerGroupName});
         }
@@ -116,6 +103,11 @@ public class ConsumePravega extends AbstractPravegaProcessor {
                 cachedClientFactory.close();
                 cachedClientFactory = null;
             }
+            if (readerGroup != null) {
+                readerGroup.close();
+                readerGroup = null;
+            }
+            readerGroupName = null;
         }
     }
 
@@ -135,9 +127,6 @@ public class ConsumePravega extends AbstractPravegaProcessor {
         try {
             while (true) {
                 final EventRead<byte[]> event = reader.readNextEvent(READER_TIMEOUT_MS);
-//                if (event == null) {
-//                    break;
-//                }
                 if (event.getEvent() == null) {
                     break;
                 }
@@ -176,13 +165,17 @@ public class ConsumePravega extends AbstractPravegaProcessor {
         if (false) {
             final String checkpointName = UUID.randomUUID().toString();
             logger.debug("Calling initiateCheckpoint");
+            // TODO: initiateCheckpoint blocks forever.
             CompletableFuture<Checkpoint> checkpointFuture = readerGroup.initiateCheckpoint(checkpointName, scheduler);
             checkpointFuture.thenAccept((Checkpoint checkpoint) -> {
                 logger.debug("checkpoint={}", new Object[]{checkpoint});
             });
         }
-//        Map<Stream, StreamCut> streamCuts = readerGroup.getStreamCuts();
-//        logger.info("streamCuts={}", new Object[]{streamCuts});
+        if (false) {
+            // TODO: getStreamCuts blocks forever.
+            Map<Stream, StreamCut> streamCuts = readerGroup.getStreamCuts();
+            logger.info("streamCuts={}", new Object[]{streamCuts});
+        }
 
         logger.debug("ConsumePravega.onTrigger: END");
     }
@@ -201,11 +194,6 @@ public class ConsumePravega extends AbstractPravegaProcessor {
                 final StreamConfiguration streamConfig = StreamConfiguration.builder()
                         .scalingPolicy(ScalingPolicy.fixed(1))
                         .build();
-                // TODO: get latest stream cut
-                final ReaderGroupConfig readerGroupConfig = ReaderGroupConfig.builder()
-                        .stream(Stream.of(scope, streamName), StreamCut.UNBOUNDED)
-                        .disableAutomaticCheckpoints()
-                        .build();
                 final String readerId = getIdentifier();
 
                 logger.info("Using reader group {}, reader ID {} to read from Pravega stream {}/{}.",
@@ -217,12 +205,25 @@ public class ConsumePravega extends AbstractPravegaProcessor {
                     streamManager.createStream(scope, streamName, streamConfig);
                 }
 
+                final ClientFactory clientFactory = ClientFactory.withScope(scope, controllerURI);
+
+                // Get latest stream cut.
+                // TODO: Using the batch client for this now. How do I use the streaming API?
+                BatchClient batchClient = clientFactory.createBatchClient();
+                StreamInfo streamInfo = batchClient.getStreamInfo(Stream.of(scope, streamName)).join();
+                StreamCut endStreamCut = streamInfo.getTailStreamCut();
+                logger.info("endStreamCut={}", new Object[]{endStreamCut});
+
+                final ReaderGroupConfig readerGroupConfig = ReaderGroupConfig.builder()
+                        .stream(Stream.of(scope, streamName), endStreamCut, StreamCut.UNBOUNDED)
+                        .disableAutomaticCheckpoints()
+                        .build();
+
                 try (ReaderGroupManager readerGroupManager = ReaderGroupManager.withScope(scope, controllerURI)) {
                     readerGroupManager.createReaderGroup(readerGroupName, readerGroupConfig);
                     readerGroup = readerGroupManager.getReaderGroup(readerGroupName);
                 }
 
-                final ClientFactory clientFactory = ClientFactory.withScope(scope, controllerURI);
                 final EventStreamReader<byte[]> reader = clientFactory.createReader(
                         readerId,
                         readerGroupName,
