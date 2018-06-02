@@ -22,17 +22,24 @@ import io.pravega.client.stream.EventStreamWriter;
 import io.pravega.client.stream.EventWriterConfig;
 import io.pravega.client.stream.ScalingPolicy;
 import io.pravega.client.stream.StreamConfiguration;
+import io.pravega.client.stream.Transaction;
+import io.pravega.client.stream.TxnFailedException;
 import io.pravega.client.stream.impl.ByteArraySerializer;
 import org.apache.nifi.annotation.behavior.*;
-import org.apache.nifi.annotation.lifecycle.OnStopped;
-import org.apache.nifi.components.PropertyDescriptor;
-import org.apache.nifi.flowfile.FlowFile;
-import org.apache.nifi.annotation.lifecycle.OnScheduled;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.SeeAlso;
 import org.apache.nifi.annotation.documentation.Tags;
+import org.apache.nifi.annotation.lifecycle.OnScheduled;
+import org.apache.nifi.annotation.lifecycle.OnStopped;
+import org.apache.nifi.components.PropertyDescriptor;
+import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.logging.ComponentLog;
-import org.apache.nifi.processor.*;
+import org.apache.nifi.processor.AbstractProcessor;
+import org.apache.nifi.processor.DataUnit;
+import org.apache.nifi.processor.ProcessContext;
+import org.apache.nifi.processor.ProcessSession;
+import org.apache.nifi.processor.ProcessorInitializationContext;
+import org.apache.nifi.processor.Relationship;
 import org.apache.nifi.processor.exception.ProcessException;
 import org.apache.nifi.processor.io.InputStreamCallback;
 import org.apache.nifi.processor.util.FlowFileFilters;
@@ -47,13 +54,14 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.CompletableFuture;
 
 @Tags({"Pravega", "Put", "Send", "Message"})
 @CapabilityDescription("Sends the contents of a FlowFile as a message to Pravega.")
 @InputRequirement(InputRequirement.Requirement.INPUT_REQUIRED)
+@EventDriven
+@SupportsBatching
 @SeeAlso({})
-@ReadsAttributes({@ReadsAttribute(attribute="", description="")})
+@ReadsAttributes({@ReadsAttribute(attribute="pravega.routing.key", description="The Pravega routing key")})
 @WritesAttributes({@WritesAttribute(attribute="", description="")})
 public class PublishPravega extends AbstractProcessor {
     protected ComponentLog logger;
@@ -63,7 +71,7 @@ public class PublishPravega extends AbstractProcessor {
     static final PropertyDescriptor PROP_CONTROLLER = new PropertyDescriptor.Builder()
             .name("controller")
             .displayName("Pravega Controller URI")
-            .description("The URI of the Pravega controller.")
+            .description("The URI of the Pravega controller (e.g. tcp://localhost:9090).")
             .required(true)
             .addValidator(StandardValidators.NON_BLANK_VALIDATOR)
             .build();
@@ -91,7 +99,7 @@ public class PublishPravega extends AbstractProcessor {
 
     static final Relationship REL_FAILURE = new Relationship.Builder()
         .name("failure")
-        .description("Any FlowFile that cannot be sent to Pravega will be routed to this Relationship")
+        .description("Any FlowFile that cannot be sent to Pravega will be routed to this Relationship.")
         .build();
 
     private List<PropertyDescriptor> descriptors;
@@ -117,17 +125,12 @@ public class PublishPravega extends AbstractProcessor {
 
     @Override
     public Set<Relationship> getRelationships() {
-        return this.relationships;
+        return relationships;
     }
 
     @Override
     public final List<PropertyDescriptor> getSupportedPropertyDescriptors() {
         return descriptors;
-    }
-
-    @OnScheduled
-    public void onScheduled(final ProcessContext context) {
-        logger.info("PublishPravega.onScheduled");
     }
 
     @OnStopped
@@ -147,7 +150,6 @@ public class PublishPravega extends AbstractProcessor {
 
     @Override
     public void onTrigger(final ProcessContext context, final ProcessSession session) throws ProcessException {
-//        System.out.println("PublishPravega.onTrigger: BEGIN");
         logger.info("PublishPravega.onTrigger: BEGIN");
 
         final List<FlowFile> flowFiles = session.get(FlowFileFilters.newSizeBasedFilter(250, DataUnit.KB, 500));
@@ -157,8 +159,7 @@ public class PublishPravega extends AbstractProcessor {
 
         try {
             EventStreamWriter<byte[]> writer = getWriter(context);
-
-            // TODO: use transaction
+            Transaction<byte[]> transaction = writer.beginTxn();
 
             for (final FlowFile flowFile : flowFiles) {
                 if (!isScheduled()) {
@@ -172,7 +173,7 @@ public class PublishPravega extends AbstractProcessor {
                     routingKey = "";
                 }
 
-                // do the read
+                // Read FlowFile contents.
                 final byte[] messageContent = new byte[(int) flowFile.getSize()];
                 session.read(flowFile, new InputStreamCallback() {
                     @Override
@@ -180,25 +181,29 @@ public class PublishPravega extends AbstractProcessor {
                         StreamUtils.fillBuffer(in, messageContent, true);
                     }
                 });
-                logger.info("routingKey={}, size={}, messageContent={}",
+
+                logger.debug("routingKey={}, size={}, messageContent={}",
                         new Object[]{routingKey, flowFile.getSize(), new String(messageContent)});
 
-                final CompletableFuture writeFuture = writer.writeEvent(routingKey, messageContent);
-                // TODO: only do wait after all messages have been sent.
-                writeFuture.get();
+                // Write to Pravega.
+                transaction.writeEvent(routingKey, messageContent);
             }
+            transaction.commit();
         }
-        catch (Exception e) {
+        catch (TxnFailedException e) {
             logger.error(e.getMessage());
-            throw new ProcessException(e);
+            // Transfer the FlowFiles to the failure relationship.
+            // The user can choose to route this back to this processor for retry.
+            session.transfer(flowFiles, REL_FAILURE);
+            return;
         }
 
         // Transfer any successful FlowFiles.
-        // TODO: do this when future completes?
         for (FlowFile success : flowFiles) {
             session.transfer(success, REL_SUCCESS);
         }
-//        System.out.println("PublishPravega.onTrigger: END");
+        // TODO: update provenance
+        // TODO: log message count and rate
         logger.info("PublishPravega.onTrigger: END");
     }
 
@@ -210,6 +215,7 @@ public class PublishPravega extends AbstractProcessor {
                     String scope = context.getProperty(PROP_SCOPE).getValue();
                     String streamName = context.getProperty(PROP_STREAM).getValue();
 
+                    // TODO: create stream only if property allows it.
                     StreamManager streamManager = StreamManager.create(controllerURI);
                     streamManager.createScope(scope);
                     StreamConfiguration streamConfig = StreamConfiguration.builder()
