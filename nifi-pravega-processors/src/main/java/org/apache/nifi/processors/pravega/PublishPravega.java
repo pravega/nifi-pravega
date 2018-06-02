@@ -121,8 +121,8 @@ public class PublishPravega extends AbstractProcessor {
             .build();
 
     ComponentLog logger;
-    EventStreamWriter<byte[]> cachedWriter;
     ClientFactory cachedClientFactory;
+    EventStreamWriter<byte[]> cachedWriter;
 
     private List<PropertyDescriptor> descriptors;
     private Set<Relationship> relationships;
@@ -280,33 +280,34 @@ public class PublishPravega extends AbstractProcessor {
     protected EventStreamWriter<byte[]> getWriter(ProcessContext context) {
         synchronized (this) {
             if (cachedWriter == null) {
+                URI controllerURI;
                 try {
-                    final URI controllerURI = new URI(context.getProperty(PROP_CONTROLLER).getValue());
-                    final String scope = context.getProperty(PROP_SCOPE).getValue();
-                    final String streamName = context.getProperty(PROP_STREAM).getValue();
-
-                    // TODO: Create scope and stream based on additional properties.
-                    final StreamManager streamManager = StreamManager.create(controllerURI);
-                    streamManager.createScope(scope);
-                    final StreamConfiguration streamConfig = StreamConfiguration.builder()
-                            .scalingPolicy(ScalingPolicy.fixed(1))
-                            .build();
-                    streamManager.createStream(scope, streamName, streamConfig);
-                    streamManager.close();
-
-                    cachedClientFactory = ClientFactory.withScope(scope, controllerURI);
-                    cachedWriter = cachedClientFactory.createEventWriter(
-                            streamName,
-                            new ByteArraySerializer(),
-                            EventWriterConfig.builder().build());
-                    return cachedWriter;
+                    controllerURI = new URI(context.getProperty(PROP_CONTROLLER).getValue());
                 } catch (URISyntaxException e) {
-                    logger.error(e.getMessage());
                     throw new RuntimeException(e);
                 }
-            } else {
-                return cachedWriter;
+                final String scope = context.getProperty(PROP_SCOPE).getValue();
+                final String streamName = context.getProperty(PROP_STREAM).getValue();
+                final StreamConfiguration streamConfig = StreamConfiguration.builder()
+                        .scalingPolicy(ScalingPolicy.fixed(1))
+                        .build();
+
+                // TODO: Create scope and stream based on additional properties.
+                try (final StreamManager streamManager = StreamManager.create(controllerURI)) {
+                    streamManager.createScope(scope);
+                    streamManager.createStream(scope, streamName, streamConfig);
+                }
+
+                final ClientFactory clientFactory = ClientFactory.withScope(scope, controllerURI);
+                final EventStreamWriter<byte[]> writer = clientFactory.createEventWriter(
+                        streamName,
+                        new ByteArraySerializer(),
+                        EventWriterConfig.builder().build());
+
+                cachedClientFactory = clientFactory;
+                cachedWriter = writer;
             }
+            return cachedWriter;
         }
     }
 }
