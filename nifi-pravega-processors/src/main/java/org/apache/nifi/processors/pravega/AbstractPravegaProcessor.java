@@ -68,4 +68,12 @@ public abstract class AbstractPravegaProcessor extends AbstractProcessor {
     static String buildTransitURI(String controller, String scope, String streamName) {
         return String.format("%s/%s/%s", controller, scope, streamName);
     }
+
+    // Based on https://stackoverflow.com/a/13006907/5890553.
+    public static String dumpByteArray(byte[] a) {
+        StringBuilder sb = new StringBuilder(a.length * 3);
+        for (byte b: a)
+            sb.append(String.format("%02x ", b));
+        return sb.toString();
+    }
 }

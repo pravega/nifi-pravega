@@ -94,7 +94,7 @@ public class ConsumePravega extends AbstractPravegaProcessor {
     @OnStopped
     public void onStop(final ProcessContext context) {
         synchronized (this) {
-            logger.debug("ConsumePravega.onStop");
+            logger.debug("onStop");
             if (cachedReader != null) {
                 cachedReader.close();
                 cachedReader = null;
@@ -113,7 +113,7 @@ public class ConsumePravega extends AbstractPravegaProcessor {
 
     @Override
     public void onTrigger(final ProcessContext context, final ProcessSession session) throws ProcessException {
-        logger.debug("ConsumePravega.onTrigger: BEGIN");
+        logger.debug("onTrigger: BEGIN");
 
         final String controller = context.getProperty(PROP_CONTROLLER).getValue();
         final String scope = context.getProperty(PROP_SCOPE).getValue();
@@ -177,7 +177,7 @@ public class ConsumePravega extends AbstractPravegaProcessor {
             logger.info("streamCuts={}", new Object[]{streamCuts});
         }
 
-        logger.debug("ConsumePravega.onTrigger: END");
+        logger.debug("onTrigger: END");
     }
 
     protected EventStreamReader<byte[]> getReader(ProcessContext context) {
