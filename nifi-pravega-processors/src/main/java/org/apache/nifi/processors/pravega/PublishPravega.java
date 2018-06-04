@@ -7,6 +7,7 @@ import org.apache.nifi.annotation.behavior.*;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.SeeAlso;
 import org.apache.nifi.annotation.documentation.Tags;
+import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.flowfile.attributes.CoreAttributes;
 import org.apache.nifi.processor.DataUnit;
@@ -20,6 +21,7 @@ import org.apache.nifi.stream.io.StreamUtils;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
@@ -32,11 +34,22 @@ import java.util.concurrent.TimeUnit;
 @ReadsAttributes({@ReadsAttribute(attribute=PublishPravega.ATTR_ROUTING_KEY, description="The Pravega routing key")})
 @SeeAlso({ConsumePravega.class})
 public class PublishPravega extends AbstractPravegaPublisher {
+    static final List<PropertyDescriptor> descriptors;
     static final String ATTR_ROUTING_KEY = "pravega.routing.key";
+
+    static {
+        final List<PropertyDescriptor> innerDescriptorsList = getAbstractPropertyDescriptors();
+        descriptors = Collections.unmodifiableList(innerDescriptorsList);
+    }
+
+    @Override
+    public final List<PropertyDescriptor> getSupportedPropertyDescriptors() {
+        return descriptors;
+    }
 
     @Override
     public void onTrigger(final ProcessContext context, final ProcessSession session) throws ProcessException {
-        logger.debug("PublishPravega.onTrigger: BEGIN");
+        logger.debug("onTrigger: BEGIN");
 
         final double maxKiBInTransaction = 1024.0;
         final int maxEventsInTransaction = 1000;
@@ -55,7 +68,7 @@ public class PublishPravega extends AbstractPravegaPublisher {
         final Transaction<byte[]> transaction = writer.beginTxn();
         final UUID txnId = transaction.getTxnId();
 
-        logger.info("Sending {} messages to Pravega stream {} in transaction {}.",
+        logger.info("Sending {} events to Pravega stream {} in transaction {}.",
                 new Object[]{flowFiles.size(), transitUri, txnId});
 
         try {
@@ -129,7 +142,7 @@ public class PublishPravega extends AbstractPravegaPublisher {
         // Commit the NiFi session so that the following log message indicates complete success.
         session.commit();
 
-        logger.info("Sent {} messages in {} milliseconds to Pravega stream {} in transaction {}.",
+        logger.info("Sent {} events in {} milliseconds to Pravega stream {} in transaction {}.",
                 new Object[]{flowFiles.size(), transmissionMillis, transitUri, txnId});
     }
 
