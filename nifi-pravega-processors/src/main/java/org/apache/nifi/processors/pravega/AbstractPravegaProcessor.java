@@ -1,5 +1,7 @@
 package org.apache.nifi.processors.pravega;
 
+import org.apache.nifi.annotation.notification.OnPrimaryNodeStateChange;
+import org.apache.nifi.annotation.notification.PrimaryNodeState;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.components.ValidationContext;
 import org.apache.nifi.components.ValidationResult;
@@ -56,10 +58,24 @@ public abstract class AbstractPravegaProcessor extends AbstractProcessor {
         return descriptors;
     }
 
+    private volatile boolean primaryNode = false;
+
     @Override
     protected void init(final ProcessorInitializationContext context) {
         logger = getLogger();
-        logger.debug("init: this={}", new Object[]{System.identityHashCode(this)});
+        primaryNode = (!context.getNodeTypeProvider().isClustered()) || context.getNodeTypeProvider().isPrimary();
+        logger.debug("init: this={}, primaryNode={}",
+                new Object[]{System.identityHashCode(this), primaryNode});
+    }
+
+    @OnPrimaryNodeStateChange
+    public void onPrimaryNodeStateChange(PrimaryNodeState state) {
+        logger.info("onPrimaryNodeStateChange: state={}", new Object[]{state});
+        primaryNode = state == PrimaryNodeState.ELECTED_PRIMARY_NODE;
+    }
+
+    public boolean isPrimaryNode() {
+        return primaryNode;
     }
 
     /**

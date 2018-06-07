@@ -5,6 +5,7 @@ import io.pravega.client.admin.ReaderGroupManager;
 import io.pravega.client.admin.StreamManager;
 import io.pravega.client.stream.*;
 import io.pravega.client.stream.impl.ByteArraySerializer;
+import org.junit.Ignore;
 import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -20,6 +21,7 @@ public class TestConsumePravega {
     private static Logger log = LoggerFactory.getLogger(TestConsumePravega.class);
 
     @Test
+    @Ignore()
     public void testProcessor() throws Exception {
         // TODO: write tests
         System.out.println("hello");

@@ -3,12 +3,16 @@ package org.apache.nifi.processors.pravega;
 import io.pravega.client.stream.ScalingPolicy;
 import io.pravega.client.stream.StreamConfiguration;
 import org.apache.nifi.annotation.behavior.InputRequirement;
+import org.apache.nifi.annotation.behavior.Stateful;
 import org.apache.nifi.annotation.behavior.SupportsBatching;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.SeeAlso;
 import org.apache.nifi.annotation.documentation.Tags;
 import org.apache.nifi.annotation.lifecycle.OnStopped;
+import org.apache.nifi.annotation.notification.OnPrimaryNodeStateChange;
+import org.apache.nifi.annotation.notification.PrimaryNodeState;
 import org.apache.nifi.components.PropertyDescriptor;
+import org.apache.nifi.components.state.Scope;
 import org.apache.nifi.logging.ComponentLog;
 import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.ProcessSession;
@@ -29,6 +33,9 @@ import java.util.concurrent.TimeUnit;
 @CapabilityDescription("Consumes events from Pravega.")
 @InputRequirement(InputRequirement.Requirement.INPUT_FORBIDDEN)
 //@SupportsBatching
+@Stateful(scopes = Scope.CLUSTER, description = "TODO After performing a fetching from HBase, stores a timestamp of the last-modified cell that was found. In addition, it stores the ID of the row(s) "
+        + "and the value of each cell that has that timestamp as its modification date. This is stored across the cluster and allows the next fetch to avoid duplicating data, even if this Processor is "
+        + "run on Primary Node only and the Primary Node changes.")
 @SeeAlso({PublishPravega.class})
 public class ConsumePravega extends AbstractPravegaProcessor {
 
@@ -84,8 +91,11 @@ public class ConsumePravega extends AbstractPravegaProcessor {
 
     @OnStopped
     public void close() {
-        final ConsumerPool pool = consumerPool;
-        consumerPool = null;
+        ConsumerPool pool;
+        synchronized (this) {
+            pool = consumerPool;
+            consumerPool = null;
+        }
         if (pool != null) {
             pool.close();
         }
@@ -118,10 +128,22 @@ public class ConsumePravega extends AbstractPravegaProcessor {
         List<String> streamNames = new ArrayList<>();
         streamNames.add(streamName);
 
-        return new ConsumerPool(
-                maxLeases, null, null,
-                controllerURI, scope, streamNames, streamConfig,
-                maxUncommittedTime, log);
+        try {
+            return new ConsumerPool(
+                    log,
+                    context.getStateManager(),
+                    this::isPrimaryNode,
+                    maxLeases,
+                    maxUncommittedTime,
+                    controllerURI,
+                    scope,
+                    streamNames,
+                    streamConfig,
+                    null,
+                    null);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     @Override
@@ -151,5 +173,6 @@ public class ConsumePravega extends AbstractPravegaProcessor {
             }
         }
     }
+
 
 }
