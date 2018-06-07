@@ -84,7 +84,7 @@ public class TestConsumePravega {
     }
 
     void LeaderThread(URI controllerURI, String scope, String readerGroupName) {
-        log.info("LeaderThread: BEGIN");
+        log.info("LeaderThread: BEGIN; this={}", System.identityHashCode(this));
         try {
             try (ReaderGroupManager readerGroupManager = ReaderGroupManager.withScope(scope, controllerURI)) {
                 try (final ReaderGroup readerGroup = readerGroupManager.getReaderGroup(readerGroupName)) {

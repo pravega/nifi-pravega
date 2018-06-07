@@ -49,7 +49,7 @@ public class PublishPravega extends AbstractPravegaPublisher {
 
     @Override
     public void onTrigger(final ProcessContext context, final ProcessSession session) throws ProcessException {
-        logger.debug("onTrigger: BEGIN");
+        logger.debug("onTrigger: BEGIN: this={}", new Object[]{System.identityHashCode(this)});
 
         final double maxKiBInTransaction = 1024.0;
         final int maxEventsInTransaction = 1000;

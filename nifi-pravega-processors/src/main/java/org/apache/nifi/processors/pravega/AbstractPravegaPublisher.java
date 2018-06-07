@@ -47,7 +47,7 @@ public abstract class AbstractPravegaPublisher extends AbstractPravegaProcessor 
     @OnStopped
     public void onStop(final ProcessContext context) {
         synchronized (this) {
-            logger.debug("onStop");
+            logger.debug("onStop: this={}", new Object[]{this});
             if (cachedWriter != null) {
                 cachedWriter.close();
                 cachedWriter = null;
@@ -61,6 +61,7 @@ public abstract class AbstractPravegaPublisher extends AbstractPravegaProcessor 
 
     protected EventStreamWriter<byte[]> getWriter(ProcessContext context) {
         synchronized (this) {
+            logger.debug("getWriter: this={}", new Object[]{System.identityHashCode(this)});
             if (cachedWriter == null) {
                 URI controllerURI;
                 try {
@@ -70,6 +71,8 @@ public abstract class AbstractPravegaPublisher extends AbstractPravegaProcessor 
                 }
                 final String scope = context.getProperty(PROP_SCOPE).getValue();
                 final String streamName = context.getProperty(PROP_STREAM).getValue();
+                logger.debug("getWriter: scope={}, streamName={}, this={}",
+                        new Object[]{scope, streamName, System.identityHashCode(this)});
                 final StreamConfiguration streamConfig = StreamConfiguration.builder()
                         .scalingPolicy(ScalingPolicy.fixed(1))
                         .build();

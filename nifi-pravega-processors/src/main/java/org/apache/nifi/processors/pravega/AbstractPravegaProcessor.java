@@ -59,6 +59,7 @@ public abstract class AbstractPravegaProcessor extends AbstractProcessor {
     @Override
     protected void init(final ProcessorInitializationContext context) {
         logger = getLogger();
+        logger.debug("init: this={}", new Object[]{System.identityHashCode(this)});
     }
 
     /**
