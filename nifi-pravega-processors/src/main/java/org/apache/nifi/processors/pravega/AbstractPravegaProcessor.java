@@ -63,19 +63,25 @@ public abstract class AbstractPravegaProcessor extends AbstractProcessor {
     @Override
     protected void init(final ProcessorInitializationContext context) {
         logger = getLogger();
-        primaryNode = (!context.getNodeTypeProvider().isClustered()) || context.getNodeTypeProvider().isPrimary();
-        logger.debug("init: this={}, primaryNode={}",
-                new Object[]{System.identityHashCode(this), primaryNode});
+//        final boolean isClustered = context.getNodeTypeProvider().isClustered();
+//        final boolean isPrimary = context.getNodeTypeProvider().isPrimary();
+//        logger.debug("init: this={}, isClustered={}, isPrimary={}",
+//                new Object[]{System.identityHashCode(this), isClustered, isPrimary});
+//        primaryNode = (!isClustered) || isPrimary;
+//        logger.debug("init: this={}, primaryNode={}",
+//                new Object[]{System.identityHashCode(this), primaryNode});
     }
 
-    @OnPrimaryNodeStateChange
-    public void onPrimaryNodeStateChange(PrimaryNodeState state) {
-        logger.info("onPrimaryNodeStateChange: state={}", new Object[]{state});
-        primaryNode = state == PrimaryNodeState.ELECTED_PRIMARY_NODE;
-    }
+//    @OnPrimaryNodeStateChange
+//    public void onPrimaryNodeStateChange(PrimaryNodeState state) {
+//        logger.info("onPrimaryNodeStateChange: state={}", new Object[]{state});
+//        primaryNode = state == PrimaryNodeState.ELECTED_PRIMARY_NODE;
+//    }
 
     public boolean isPrimaryNode() {
-        return primaryNode;
+        final boolean isPrimary = getNodeTypeProvider().isPrimary();
+        logger.info("getNodeTypeProvider().isPrimary()={}", new Object[]{isPrimary});
+        return isPrimary;
     }
 
     /**

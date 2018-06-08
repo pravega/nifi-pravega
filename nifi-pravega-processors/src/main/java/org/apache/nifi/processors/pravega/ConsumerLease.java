@@ -109,13 +109,14 @@ public abstract class ConsumerLease implements Closeable {
                         return false;
                     } else {
                         getProcessSession().commit();
-                        return true;
+//                        return true;
                     }
                 } else if (eventRead.getEvent() == null) {
                     // Timeout occurred.
+                    logger.info("timeout waiting for next event");
                     // We do not expect this to happen until the processor is stopping and periodic checkpoints have stopped.
-                    this.poison();
-                    throw new ProcessException("readNextEvent timed out; processed events will be rolled back");
+//                    this.poison();
+//                    throw new ProcessException("readNextEvent timed out; processed events will be rolled back");
                 } else {
                     processEvent(eventRead);
                 }

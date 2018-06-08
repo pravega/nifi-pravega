@@ -70,9 +70,9 @@ public class ConsumerPool implements AutoCloseable {
     private final Supplier<Boolean> isPrimaryNode;
 
     static private final String STATE_KEY_READER_GROUP = "reader.group.name";
-    static private final String STATE_KEY_CHECKPOINT_NAME = "reader.group.checkpointMutex.name";
-    static private final String STATE_KEY_CHECKPOINT_BASE64 = "reader.group.checkpointMutex.base64";
-    static private final String STATE_KEY_CHECKPOINT_TIME = "reader.group.checkpointMutex.time";
+    static private final String STATE_KEY_CHECKPOINT_NAME = "reader.group.checkpoint.name";
+    static private final String STATE_KEY_CHECKPOINT_BASE64 = "reader.group.checkpoint.base64";
+    static private final String STATE_KEY_CHECKPOINT_TIME = "reader.group.checkpoint.time";
 
     /**
      * Creates a pool of Pravega reader objects that will grow up to the maximum
@@ -179,10 +179,10 @@ public class ConsumerPool implements AutoCloseable {
                                     throw new RuntimeException("bug");
                                 }
                                 // This could occur if user stopped and started this processor.
-                                // Use previous group and reset it to our checkpointMutex.
+                                // Use previous group and reset it to our checkpoint.
                                 // The primary node will be responsible for resetting the reader group.
                                 final String checkpointStr = stateMap.get(STATE_KEY_CHECKPOINT_BASE64);
-                                logger.debug("ConsumerPool: Resetting the reader group to checkpointMutex {}", new Object[]{checkpointStr});
+                                logger.debug("ConsumerPool: Resetting the reader group to checkpoint {}", new Object[]{checkpointStr});
                                 final Checkpoint checkpoint = Checkpoint.fromBytes(ByteBuffer.wrap(Base64.getDecoder().decode(checkpointStr)));
                                 final ReaderGroupConfig readerGroupConfig = ReaderGroupConfig.builder()
                                         .startFromCheckpoint(checkpoint)
@@ -215,9 +215,7 @@ public class ConsumerPool implements AutoCloseable {
         scheduler.schedule(this::initiateCheckpoint, 1000, TimeUnit.MILLISECONDS);
     }
 
-//    private volatile boolean isCheckpointInProgress = false;
     private volatile boolean stopCheckpointing = false;
-//    private Lock checkpointMutex = new ReentrantLock();
     private final Object checkpointMutex = new Object();
 
     void initiateCheckpoint() {
@@ -236,7 +234,7 @@ public class ConsumerPool implements AutoCloseable {
                     Checkpoint checkpoint = checkpointFuture.get();
                     logger.debug("initiateCheckpoint: checkpoint={}, positions={}", new Object[]{checkpoint, checkpoint.asImpl().getPositions()});
                     if (isPrimaryNode.get()) {
-                        // Get serialized checkpointMutex byte array and convert to base64 string.
+                        // Get serialized checkpoint byte array and convert to base64 string.
                         String checkpointStr = new String(Base64.getEncoder().encode(checkpoint.toBytes().array()));
                         Map<String, String> mapState = new HashMap<>();
                         mapState.put(STATE_KEY_READER_GROUP, readerGroupName);
@@ -265,33 +263,29 @@ public class ConsumerPool implements AutoCloseable {
         // Therefore, if any checkpoint is in progress, we want to wait for it and ensure that another one does not start.
         // However, it is also possible that onTrigger is no longer scheduled, leaving a reader idle and not
         // progressing toward the checkpoint.
+        // To work around this issue, onTrigger does not return until the QUIT signal is received.
+        // TODO: Another option is to open a new session and flush to it. Which method is better?
 
-        // If a checkpoint is in progress, wait for it to complete.
-        // Also prevent any future checkpoints form occurring.
-//        logger.debug("onUnscheduled: waiting for checkpoint mutex");
-        // TODO: stuck here
-//        synchronized (checkpointMutex) {
-//            logger.debug("onUnscheduled: got checkpoint mutex");
-//            stopCheckpointing = true;
-//        }
+        if (isPrimaryNode.get()) {
+            // If a checkpoint is in progress, wait for it to complete.
+            // Also prevent any future checkpoints from occurring.
+            logger.debug("onUnscheduled: waiting for checkpoint mutex");
+            synchronized (checkpointMutex) {
+                logger.debug("onUnscheduled: got checkpoint mutex");
+                stopCheckpointing = true;
+            }
 
-        // We must now have the guarantee that no checkpoints are in progress and that no checkpoints will be initiated.
-        // Then we no longer need onTrigger to run.
-        // However, onTrigger threads are likely already running and we need them to terminate quickly.
+            // We must now have the guarantee that no checkpoints are in progress and that no checkpoints will be initiated.
+            // Then we no longer need onTrigger to run.
+            // However, onTrigger threads are likely already running and we need them to terminate quickly.
 
-        // Send a QUIT signal to all readers.
-        // We do this by using a checkpoint name with QUIT as the prefix.
-        final String checkpointName = CHECKPOINT_NAME_QUIT_PREFIX + UUID.randomUUID().toString();
-        logger.debug("onUnscheduled: Calling initiateCheckpoint(checkpointName={})", new Object[]{checkpointName});
-        CompletableFuture<Checkpoint> checkpointFuture = readerGroup.initiateCheckpoint(checkpointName, scheduler);
+            // Send a QUIT signal to all readers.
+            // We do this by using a checkpoint name with QUIT as the prefix.
+            final String checkpointName = CHECKPOINT_NAME_QUIT_PREFIX + UUID.randomUUID().toString();
+            logger.debug("onUnscheduled: Calling initiateCheckpoint(checkpointName={})", new Object[]{checkpointName});
+            CompletableFuture<Checkpoint> checkpointFuture = readerGroup.initiateCheckpoint(checkpointName, scheduler);
+        }
     }
-
-//    void flushLeases(final ProcessContext context) {
-//        try (final ConsumerLease lease = obtainConsumer(session, context)) {
-//        }
-//        }
-//
-//    }
 
     /**
      * Obtains a consumer from the pool if one is available or lazily
