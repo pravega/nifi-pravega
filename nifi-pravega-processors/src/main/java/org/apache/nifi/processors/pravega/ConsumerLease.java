@@ -50,8 +50,9 @@ public abstract class ConsumerLease implements Closeable {
     private final RecordReaderFactory readerFactory;
     private boolean poisoned = false;
     private long leaseStartNanos = -1;
-    private boolean lastPollEmpty = false;
-    private int totalMessages = 0;
+//    private boolean lastPollEmpty = false;
+//    private int totalMessages = 0;
+//    private boolean gotFinalCheckpoint = false;
 
     ConsumerLease(
             final long maxWaitMillis,
@@ -72,34 +73,44 @@ public abstract class ConsumerLease implements Closeable {
      */
     private void resetInternalState() {
         leaseStartNanos = -1;
-        lastPollEmpty = false;
-        totalMessages = 0;
+//        lastPollEmpty = false;
+//        totalMessages = 0;
     }
 
     /**
-     * Executes a poll on the underlying Pravega Reader and creates any new
+     * Executes a readEventsUntilCheckpoint on the underlying Pravega Reader and creates any new
      * flowfiles necessary.
      */
-    void poll() {
+    void readEventsUntilCheckpoint() {
         try {
             while (true) {
-                final long READER_TIMEOUT_MS = 10;
+                final long READER_TIMEOUT_MS = 10000;
                 final EventRead<byte[]> eventRead = pravegaReader.readNextEvent(READER_TIMEOUT_MS);
                 if (eventRead.isCheckpoint()) {
-                    lastPollEmpty = false;
                     commit();
-                } else if (eventRead.getEvent() == null) {
-                    lastPollEmpty = true;
+                    // Call readNextEvent to indicate to Pravega that we are done with the checkpoint.
+                    // We do not want the result now.
+                    pravegaReader.readNextEvent(0);
                     break;
+//                    lastPollEmpty = false;
+//                    if (eventRead.getCheckpointName() == "FINAL") {
+//                        gotFinalCheckpoint = true;
+//                        pravegaReader.readNextEvent(0);
+//                        break;
+//                    }
+                } else if (eventRead.getEvent() == null) {
+                    throw new ProcessException("readNextEvent timed out; processed events will be rolled back");
+//                    lastPollEmpty = true;
+//                    break;
                     }
                 else {
-                    lastPollEmpty = false;
+//                    lastPollEmpty = false;
                     processEvent(eventRead);
                 }
             }
         }
         catch (ReinitializationRequiredException e) {
-            // TODO: is this required?
+            // This reader must be closed so that a new one can be created.
             this.poison();
             throw new ProcessException(e);
         } catch (final ProcessException pe) {
@@ -117,6 +128,7 @@ public abstract class ConsumerLease implements Closeable {
      */
     boolean commit() {
         try {
+            logger.debug("commit");
             getProcessSession().commit();
             // TODO: when to return false?
             return true;
@@ -126,38 +138,42 @@ public abstract class ConsumerLease implements Closeable {
         }
     }
 
-    /**
-     * Indicates whether we should continue polling for data.
-     * We must be very mindful of memory usage for
-     * the flow file objects (not their content) being held in memory. The
-     * content of Pravega events will be written to the content repository
-     * immediately upon each poll call but we must still be mindful of how much
-     * memory can be used in each poll call. We will indicate that we should
-     * stop polling our last poll call produced no new results or if we've been
-     * polling and processing data longer than the specified maximum polling
-     * time or if we have reached out specified max flow file limit;
-     * otherwise true.
-     *
-     * @return true if should keep polling; false otherwise
-     */
-    boolean continuePolling() {
-        // stop if the last poll produced new no data
-        if (lastPollEmpty) {
-            return false;
-        }
+//    /**
+//     * Indicates whether we should continue polling for data.
+//     * We must be very mindful of memory usage for
+//     * the flow file objects (not their content) being held in memory. The
+//     * content of Pravega events will be written to the content repository
+//     * immediately upon each readEventsUntilCheckpoint call but we must still be mindful of how much
+//     * memory can be used in each readEventsUntilCheckpoint call. We will indicate that we should
+//     * stop polling our last readEventsUntilCheckpoint call produced no new results or if we've been
+//     * polling and processing data longer than the specified maximum polling
+//     * time or if we have reached out specified max flow file limit;
+//     * otherwise true.
+//     *
+//     * @return true if should keep polling; false otherwise
+//     */
+//    boolean continuePolling() {
+//        // stop if the last readEventsUntilCheckpoint produced new no data
+//        if (lastPollEmpty) {
+//            return false;
+//        }
+//
+//        // stop if we've gone past our desired max uncommitted wait time
+//        if (leaseStartNanos < 0) {
+//            leaseStartNanos = System.nanoTime();
+//        }
+//        final long durationMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - leaseStartNanos);
+//        if (durationMillis > maxWaitMillis) {
+//            return false;
+//        }
+//
+//        // stop if we've generated enough flowfiles that we need to be concerned about memory usage for the objects
+//        return totalMessages < 1000; // admittedlly a magic number - good candidate for processor property
+//    }
 
-        // stop if we've gone past our desired max uncommitted wait time
-        if (leaseStartNanos < 0) {
-            leaseStartNanos = System.nanoTime();
-        }
-        final long durationMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - leaseStartNanos);
-        if (durationMillis > maxWaitMillis) {
-            return false;
-        }
-
-        // stop if we've generated enough flowfiles that we need to be concerned about memory usage for the objects
-        return totalMessages < 1000; // admittedlly a magic number - good candidate for processor property
-    }
+//    boolean gotFinalCheckpoint() {
+//        return gotFinalCheckpoint;
+//    }
 
     /**
      * Indicates that the underlying session and consumer should be immediately
@@ -196,7 +212,7 @@ public abstract class ConsumerLease implements Closeable {
 
     private void processEvent(final EventRead<byte[]> eventRead) {
         writeData(getProcessSession(), eventRead);
-        totalMessages++;
+//        totalMessages++;
     }
 
     private void writeData(final ProcessSession session, final EventRead<byte[]> eventRead) {
@@ -209,7 +225,7 @@ public abstract class ConsumerLease implements Closeable {
             });
         }
         flowFile = session.putAllAttributes(flowFile, getAttributes(eventRead));
-        // TODO
+        // TODO: set transitUri
         final String transitUri = "TODO transitUri";
         session.getProvenanceReporter().receive(flowFile, transitUri);
         session.transfer(flowFile, REL_SUCCESS);
@@ -220,16 +236,6 @@ public abstract class ConsumerLease implements Closeable {
         attributes.put("pravega.event", eventRead.toString());
         attributes.put("pravega.event.getEventPointer", eventRead.getEventPointer().toString());
         return attributes;
-    }
-
-    private void closeWriter(final RecordSetWriter writer) {
-        try {
-            if (writer != null) {
-                writer.close();
-            }
-        } catch (final Exception ioe) {
-            logger.warn("Failed to close Record Writer", ioe);
-        }
     }
 
     // TODO: is below needed?

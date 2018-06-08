@@ -131,7 +131,10 @@ public class ConsumerPool implements AutoCloseable {
                 // Create reader group manager.
                 readerGroupManager = ReaderGroupManager.withScope(scope, controllerURI);
                 try {
-                    if (!havePreviousState && primaryNode) {
+                    if (!havePreviousState) {
+                        if (!(!havePreviousState && primaryNode)) {
+                            throw new RuntimeException("bug");
+                        }
                         // This processor is starting for the first time on the primary node.
                         readerGroupName = UUID.randomUUID().toString().replace("-", "");
                         logger.debug("ConsumerPool: Using new reader group {}", new Object[]{readerGroupName});
@@ -159,9 +162,11 @@ public class ConsumerPool implements AutoCloseable {
                                 .build();
                         readerGroupManager.createReaderGroup(readerGroupName, readerGroupConfig);
                         readerGroup = readerGroupManager.getReaderGroup(readerGroupName);
-                    } else if (havePreviousState && primaryNode) {
-                        // This could occur if user stopped and started this processor.
-                        // Use previous group and reset it to our checkpoint.
+                    } else {
+                        if (!havePreviousState) {
+                            throw new RuntimeException("bug");
+                        }
+                        // Use the reader group from the previous state.
                         logger.debug("ConsumerPool: previous state={}", new Object[]{stateMap.toMap()});
                         final String prevReaderGroupName = stateMap.get(STATE_KEY_READER_GROUP);
                         if (prevReaderGroupName == null || prevReaderGroupName.isEmpty()) {
@@ -171,30 +176,26 @@ public class ConsumerPool implements AutoCloseable {
                         logger.debug("ConsumerPool: Using existing reader group {}", new Object[]{readerGroupName});
                         readerGroup = readerGroupManager.getReaderGroup(readerGroupName);
                         try {
-                            final String checkpointStr = stateMap.get(STATE_KEY_CHECKPOINT_BASE64);
-                            logger.debug("ConsumerPool: Resetting the reader group to checkpoint {}", new Object[]{checkpointStr});
-                            final Checkpoint checkpoint = Checkpoint.fromBytes(ByteBuffer.wrap(Base64.getDecoder().decode(checkpointStr)));
-                            final ReaderGroupConfig readerGroupConfig = ReaderGroupConfig.builder()
-                                    .startFromCheckpoint(checkpoint)
-                                    .disableAutomaticCheckpoints()
-                                    .build();
-                            readerGroup.resetReaderGroup(readerGroupConfig);
+                            if (primaryNode) {
+                                if (!(havePreviousState && primaryNode)) {
+                                    throw new RuntimeException("bug");
+                                }
+                                // This could occur if user stopped and started this processor.
+                                // Use previous group and reset it to our checkpoint.
+                                // The primary node will be responsible for resetting the reader group.
+                                final String checkpointStr = stateMap.get(STATE_KEY_CHECKPOINT_BASE64);
+                                logger.debug("ConsumerPool: Resetting the reader group to checkpoint {}", new Object[]{checkpointStr});
+                                final Checkpoint checkpoint = Checkpoint.fromBytes(ByteBuffer.wrap(Base64.getDecoder().decode(checkpointStr)));
+                                final ReaderGroupConfig readerGroupConfig = ReaderGroupConfig.builder()
+                                        .startFromCheckpoint(checkpoint)
+                                        .disableAutomaticCheckpoints()
+                                        .build();
+                                readerGroup.resetReaderGroup(readerGroupConfig);
+                            }
                         } catch (Exception e) {
                             readerGroup.close();
                             throw e;
                         }
-                    } else /*if (havePreviousState && !primaryNode)*/ {
-                        // This processor is starting on a second node.
-                        // Use the existing reader group as is.
-//                        throw new Exception("unsupported");
-                        logger.debug("ConsumerPool: previous state={}", new Object[]{stateMap.toMap()});
-                        final String prevReaderGroupName = stateMap.get(STATE_KEY_READER_GROUP);
-                        if (prevReaderGroupName == null || prevReaderGroupName.isEmpty()) {
-                            throw new Exception("State is missing the reader group name.");
-                        }
-                        readerGroupName = prevReaderGroupName;
-                        logger.debug("ConsumerPool: Using existing reader group {}", new Object[]{readerGroupName});
-                        readerGroup = readerGroupManager.getReaderGroup(readerGroupName);
                     }
                 } catch (Exception e) {
                     readerGroupManager.close();
@@ -216,10 +217,13 @@ public class ConsumerPool implements AutoCloseable {
         scheduler.schedule(this::initiateCheckpoint, 1000, TimeUnit.MILLISECONDS);
     }
 
+    volatile boolean isCheckpointInProgress = false;
+
     void initiateCheckpoint() {
         if (isPrimaryNode.get()) {
             final String checkpointName = UUID.randomUUID().toString();
             logger.debug("initiateCheckpoint: Calling initiateCheckpoint(checkpointName={})", new Object[]{checkpointName});
+            isCheckpointInProgress = true;
             CompletableFuture<Checkpoint> checkpointFuture = readerGroup.initiateCheckpoint(checkpointName, scheduler);
             logger.debug("initiateCheckpoint: Got future.");
             checkpointFuture.whenComplete(this::afterCheckpoint);
@@ -229,8 +233,9 @@ public class ConsumerPool implements AutoCloseable {
     }
 
     void afterCheckpoint(Checkpoint checkpoint, Throwable ex) {
+        isCheckpointInProgress = false;
         if (ex == null) {
-            logger.info("afterCheckpoint: checkpoint={}, positions={}", new Object[]{checkpoint, checkpoint.asImpl().getPositions()});
+            logger.debug("afterCheckpoint: checkpoint={}, positions={}", new Object[]{checkpoint, checkpoint.asImpl().getPositions()});
             if (isPrimaryNode.get()) {
                 // Get serialized checkpoint byte array and convert to base64 string.
                 String checkpointStr = new String(Base64.getEncoder().encode(checkpoint.toBytes().array()));
@@ -298,6 +303,22 @@ public class ConsumerPool implements AutoCloseable {
         logger.debug("createPravegaReader: readerId={}", new Object[]{readerId});
         return reader;
     }
+
+    private volatile boolean stopCheckpointing = false;
+
+//    public void onUnscheduled(final ProcessContext context) {
+//        logger.info("onUnscheduled: BEGIN");
+//        stopCheckpointing = true;
+//        while (isCheckpointInProgress) {
+//            Thread.sleep(10);
+//        }
+//        // Stop scheduler.
+//        // initiate final checkpoint.
+//        initiateCheckpoint(true);
+//        // When readers get final checkpoint, they must stop reading.
+//        // write checkpoint to state.
+//        logger.info("onUnscheduled: END");
+//    }
 
     /**
      * Closes all consumers in the pool.

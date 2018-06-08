@@ -4,13 +4,10 @@ import io.pravega.client.stream.ScalingPolicy;
 import io.pravega.client.stream.StreamConfiguration;
 import org.apache.nifi.annotation.behavior.InputRequirement;
 import org.apache.nifi.annotation.behavior.Stateful;
-import org.apache.nifi.annotation.behavior.SupportsBatching;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.SeeAlso;
 import org.apache.nifi.annotation.documentation.Tags;
 import org.apache.nifi.annotation.lifecycle.OnStopped;
-import org.apache.nifi.annotation.notification.OnPrimaryNodeStateChange;
-import org.apache.nifi.annotation.notification.PrimaryNodeState;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.components.state.Scope;
 import org.apache.nifi.logging.ComponentLog;
@@ -39,7 +36,21 @@ import java.util.concurrent.TimeUnit;
 @SeeAlso({PublishPravega.class})
 public class ConsumePravega extends AbstractPravegaProcessor {
 
-    // TODO: allow concurrent tasks for this processor
+//    static final AllowableValue OFFSET_EARLIEST = new AllowableValue("earliest", "earliest", "Automatically reset the offset to the earliest offset");
+//
+//    static final AllowableValue OFFSET_LATEST = new AllowableValue("latest", "latest", "Automatically reset the offset to the latest offset");
+//
+//    static final AllowableValue OFFSET_NONE = new AllowableValue("none", "none", "Throw exception to the consumer if no previous offset is found for the consumer's group");
+//
+//    static final PropertyDescriptor AUTO_OFFSET_RESET = new PropertyDescriptor.Builder()
+//            .name(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG)
+//            .displayName("Offset Reset")
+//            .description("Allows you to manage the condition when there is no initial offset in Kafka or if the current offset does not exist any "
+//                    + "more on the server (e.g. because that data has been deleted). Corresponds to Kafka's 'auto.offset.reset' property.")
+//            .required(true)
+//            .allowableValues(OFFSET_EARLIEST, OFFSET_LATEST, OFFSET_NONE)
+//            .defaultValue(OFFSET_LATEST.getValue())
+//            .build();
 
     static final PropertyDescriptor MAX_UNCOMMITTED_TIME = new PropertyDescriptor.Builder()
             .name("max-uncommit-offset-wait")
@@ -59,8 +70,6 @@ public class ConsumePravega extends AbstractPravegaProcessor {
             .build();
 
     private volatile ConsumerPool consumerPool = null;
-
-//    ScheduledExecutorService scheduler;
 
     static final List<PropertyDescriptor> DESCRIPTORS;
     static final Set<Relationship> RELATIONSHIPS;
@@ -88,6 +97,14 @@ public class ConsumePravega extends AbstractPravegaProcessor {
         // TODO: is this needed?
 //        scheduler = Executors.newScheduledThreadPool(1);
     }
+
+//    @OnUnscheduled
+//    public void onUnscheduled(final ProcessContext context) {
+//        ConsumerPool pool = consumerPool;
+//        if (pool != null) {
+//            pool.onUnscheduled(context);
+//        }
+//    }
 
     @OnStopped
     public void close() {
@@ -159,20 +176,22 @@ public class ConsumePravega extends AbstractPravegaProcessor {
                 context.yield();
                 return;
             }
-
+//            if (lease.gotFinalCheckpoint()) {
+//                context.yield();
+//                return;
+//            }
             try {
-                while (this.isScheduled() && lease.continuePolling()) {
-                    lease.poll();
+                while (this.isScheduled()) {
+                    lease.readEventsUntilCheckpoint();
                 }
-                if (this.isScheduled() && !lease.commit()) {
-                    context.yield();
-                }
+//                if (this.isScheduled() && !lease.commit()) {
+//                    context.yield();
+//                }
             } catch (final Throwable t) {
                 getLogger().error("Exception while processing data from Pravega so will close the lease {} due to {}",
                         new Object[]{lease, t}, t);
             }
         }
     }
-
 
 }
