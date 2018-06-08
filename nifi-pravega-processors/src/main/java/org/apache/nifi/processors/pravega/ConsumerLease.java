@@ -24,16 +24,14 @@ import org.apache.nifi.logging.ComponentLog;
 import org.apache.nifi.processor.ProcessSession;
 import org.apache.nifi.processor.exception.ProcessException;
 import org.apache.nifi.serialization.RecordReaderFactory;
-import org.apache.nifi.serialization.RecordSetWriter;
 import org.apache.nifi.serialization.RecordSetWriterFactory;
 
 import java.io.Closeable;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.TimeUnit;
 
 import static org.apache.nifi.processors.pravega.ConsumePravega.REL_SUCCESS;
-import static org.apache.nifi.processors.pravega.ConsumerPool.CHECKPOINT_NAME_QUIT_PREFIX;
+import static org.apache.nifi.processors.pravega.ConsumerPool.CHECKPOINT_NAME_FINAL_PREFIX;
 
 /**
  * This class represents a lease to access a Pravega Reader object. The lease is
@@ -44,41 +42,24 @@ import static org.apache.nifi.processors.pravega.ConsumerPool.CHECKPOINT_NAME_QU
  */
 public abstract class ConsumerLease implements Closeable {
 
-    private final long maxWaitMillis;
     private final EventStreamReader<byte[]> pravegaReader;
     private final ComponentLog logger;
     private final RecordSetWriterFactory writerFactory;
     private final RecordReaderFactory readerFactory;
     private boolean poisoned = false;
-    private long leaseStartNanos = -1;
-//    private boolean lastPollEmpty = false;
-//    private int totalMessages = 0;
-//    private boolean gotFinalCheckpoint = false;
 
     ConsumerLease(
-            final long maxWaitMillis,
             final EventStreamReader<byte[]> pravegaReader,
             final RecordReaderFactory readerFactory,
             final RecordSetWriterFactory writerFactory,
             final ComponentLog logger) {
-        this.maxWaitMillis = maxWaitMillis;
         this.pravegaReader = pravegaReader;
         this.readerFactory = readerFactory;
         this.writerFactory = writerFactory;
         this.logger = logger;
     }
 
-    /**
-     * clears out internal state elements excluding session and consumer as
-     * those are managed by the pool itself
-     */
-    private void resetInternalState() {
-        leaseStartNanos = -1;
-//        lastPollEmpty = false;
-//        totalMessages = 0;
-    }
-
-    boolean gotQuitSignal = false;
+    private boolean gotQuitSignal = false;
 
     /**
      * Executes readNextEvent's on the underlying Pravega Reader and creates any new
@@ -96,27 +77,22 @@ public abstract class ConsumerLease implements Closeable {
                 final long READER_TIMEOUT_MS = 10000;
                 final EventRead<byte[]> eventRead = pravegaReader.readNextEvent(READER_TIMEOUT_MS);
                 if (eventRead.isCheckpoint()) {
-                    // If this is a QUIT checkpoint, we rollback and exit.
-                    boolean isQuitSignal = eventRead.getCheckpointName().startsWith(CHECKPOINT_NAME_QUIT_PREFIX);
-                    if (isQuitSignal) {
+                    getProcessSession().commit();
+                    boolean isFinalCheckpoint = eventRead.getCheckpointName().startsWith(CHECKPOINT_NAME_FINAL_PREFIX);
+                    if (isFinalCheckpoint) {
+                        logger.info("readEventsUntilCheckpoint: got final checkpoint");
                         gotQuitSignal = true;
-                        logger.info("readEventsUntilCheckpoint: got QUIT signal");
                         // Call readNextEvent to indicate to Pravega that we are done with the checkpoint.
                         // The result will be discarded;
+                        // TODO: Does readNextEvent followed by close of reader advance the read position?
                         pravegaReader.readNextEvent(0);
                         // Ensure that this reader does not get reused.
                         this.poison();
                         return false;
-                    } else {
-                        getProcessSession().commit();
-//                        return true;
                     }
                 } else if (eventRead.getEvent() == null) {
-                    // Timeout occurred.
+                    // Timeout occurred. We just log this and continue the read loop.
                     logger.info("timeout waiting for next event");
-                    // We do not expect this to happen until the processor is stopping and periodic checkpoints have stopped.
-//                    this.poison();
-//                    throw new ProcessException("readNextEvent timed out; processed events will be rolled back");
                 } else {
                     processEvent(eventRead);
                 }
@@ -152,17 +128,8 @@ public abstract class ConsumerLease implements Closeable {
         return poisoned;
     }
 
-    /**
-     * Abstract method that is intended to be extended by the pool that created
-     * this ConsumerLease object. It should ensure that the session given to
-     * create this session is rolled back and that the underlying Pravega reader
-     * is either returned to the pool for continued use or destroyed if this
-     * lease has been poisoned. It can only be called once. Calling it more than
-     * once can result in undefined and non threadsafe behavior.
-     */
     @Override
     public void close() {
-        resetInternalState();
     }
 
     public abstract ProcessSession getProcessSession();
@@ -171,7 +138,6 @@ public abstract class ConsumerLease implements Closeable {
 
     private void processEvent(final EventRead<byte[]> eventRead) {
         writeData(getProcessSession(), eventRead);
-//        totalMessages++;
     }
 
     private void writeData(final ProcessSession session, final EventRead<byte[]> eventRead) {
@@ -196,20 +162,5 @@ public abstract class ConsumerLease implements Closeable {
         attributes.put("pravega.event.getEventPointer", eventRead.getEventPointer().toString());
         return attributes;
     }
-
-    // TODO: is below needed?
-//    private void rollback(final TopicPartition topicPartition) {
-//        try {
-//            OffsetAndMetadata offsetAndMetadata = uncommittedOffsetsMap.get(topicPartition);
-//            if (offsetAndMetadata == null) {
-//                offsetAndMetadata = kafkaConsumer.committed(topicPartition);
-//            }
-//
-//            final long offset = offsetAndMetadata == null ? 0L : offsetAndMetadata.offset();
-//            kafkaConsumer.seek(topicPartition, offset);
-//        } catch (final Exception rollbackException) {
-//            logger.warn("Attempted to rollback Kafka message offset but was unable to do so", rollbackException);
-//        }
-//    }
 
 }

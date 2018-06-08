@@ -30,7 +30,6 @@ import org.apache.nifi.processor.ProcessSession;
 import org.apache.nifi.serialization.RecordReaderFactory;
 import org.apache.nifi.serialization.RecordSetWriterFactory;
 
-import java.io.IOException;
 import java.net.URI;
 import java.nio.ByteBuffer;
 import java.time.ZoneOffset;
@@ -113,7 +112,8 @@ public class ConsumerPool implements AutoCloseable {
         boolean primaryNode = isPrimaryNode.get();
 
         StateMap stateMap = stateManager.getState(Scope.CLUSTER);
-        boolean havePreviousState = !stateMap.toMap().isEmpty();
+        Map<String, String> state = stateMap.toMap();
+        boolean havePreviousState = !state.isEmpty();
 
         if (!havePreviousState && !primaryNode) {
             throw new RuntimeException("Non-primary node can't start until state exists. Try again later.");
@@ -212,32 +212,33 @@ public class ConsumerPool implements AutoCloseable {
                 new Object[]{readerGroupName, scope, streamNames});
 
         // Schedule periodic task to initiate checkpoints.
-        scheduler.schedule(this::initiateCheckpoint, 1000, TimeUnit.MILLISECONDS);
+        scheduler.schedule(this::performRegularCheckpoint, 1000, TimeUnit.MILLISECONDS);
     }
 
-    private volatile boolean stopCheckpointing = false;
+//    private volatile boolean stopCheckpointing = false;
     private final Object checkpointMutex = new Object();
 
-    void initiateCheckpoint() {
+    void performRegularCheckpoint() {
+        performCheckpoint(false);
+    }
+
+    void performCheckpoint(boolean isFinal) {
         synchronized (checkpointMutex) {
             try {
-                if (stopCheckpointing) {
-                    // Return without scheduling this method again.
-                    logger.debug("initiateCheckpoint: stopCheckpointing set");
-                    return;
-                }
                 if (isPrimaryNode.get()) {
-                    final String checkpointName = UUID.randomUUID().toString();
-                    logger.debug("initiateCheckpoint: Calling initiateCheckpoint(checkpointName={})", new Object[]{checkpointName});
+                    final String checkpointName = (isFinal ? CHECKPOINT_NAME_FINAL_PREFIX : "") + UUID.randomUUID().toString();
+                    logger.debug("performCheckpoint: Calling initiateCheckpoint; checkpointName={}", new Object[]{checkpointName});
                     CompletableFuture<Checkpoint> checkpointFuture = readerGroup.initiateCheckpoint(checkpointName, scheduler);
-                    logger.debug("initiateCheckpoint: Got future.");
+                    logger.debug("performCheckpoint: Got future.");
                     Checkpoint checkpoint = checkpointFuture.get();
-                    logger.debug("initiateCheckpoint: checkpoint={}, positions={}", new Object[]{checkpoint, checkpoint.asImpl().getPositions()});
+                    logger.debug("performCheckpoint: Checkpoint completed; checkpoint={}, positions={}", new Object[]{checkpoint, checkpoint.asImpl().getPositions()});
                     if (isPrimaryNode.get()) {
                         // Get serialized checkpoint byte array and convert to base64 string.
                         String checkpointStr = new String(Base64.getEncoder().encode(checkpoint.toBytes().array()));
                         Map<String, String> mapState = new HashMap<>();
-                        mapState.put(STATE_KEY_READER_GROUP, readerGroupName);
+//                        if (!isFinal) {
+                            mapState.put(STATE_KEY_READER_GROUP, readerGroupName);
+//                        }
                         mapState.put(STATE_KEY_CHECKPOINT_BASE64, checkpointStr);
                         mapState.put(STATE_KEY_CHECKPOINT_NAME, checkpoint.getName());
                         mapState.put(STATE_KEY_CHECKPOINT_TIME, ZonedDateTime.now(ZoneOffset.UTC).format(DateTimeFormatter.ISO_INSTANT));
@@ -245,14 +246,16 @@ public class ConsumerPool implements AutoCloseable {
                     }
                 }
             } catch (final Exception e) {
-                logger.warn("initiateCheckpoint: {}", new Object[]{e.getMessage()});
+                logger.warn("performCheckpoint: {}", new Object[]{e.getMessage()});
                 // Ignore error. We will retry when we are scheduled again.
             }
-        scheduler.schedule(this::initiateCheckpoint, 1000, TimeUnit.MILLISECONDS);
+            if (!isFinal) {
+                scheduler.schedule(this::performRegularCheckpoint, 1000, TimeUnit.MILLISECONDS);
+            }
         }
     }
 
-    final static String CHECKPOINT_NAME_QUIT_PREFIX = "QUIT-";
+    final static String CHECKPOINT_NAME_FINAL_PREFIX = "FINAL-";
 
     public void onUnscheduled(final ProcessContext context) {
         // TODO: this is not working correctly
@@ -269,11 +272,11 @@ public class ConsumerPool implements AutoCloseable {
         if (isPrimaryNode.get()) {
             // If a checkpoint is in progress, wait for it to complete.
             // Also prevent any future checkpoints from occurring.
-            logger.debug("onUnscheduled: waiting for checkpoint mutex");
-            synchronized (checkpointMutex) {
-                logger.debug("onUnscheduled: got checkpoint mutex");
-                stopCheckpointing = true;
-            }
+//            logger.debug("onUnscheduled: waiting for checkpoint mutex");
+//            synchronized (checkpointMutex) {
+//                logger.debug("onUnscheduled: got checkpoint mutex");
+//                stopCheckpointing = true;
+//            }
 
             // We must now have the guarantee that no checkpoints are in progress and that no checkpoints will be initiated.
             // Then we no longer need onTrigger to run.
@@ -281,9 +284,10 @@ public class ConsumerPool implements AutoCloseable {
 
             // Send a QUIT signal to all readers.
             // We do this by using a checkpoint name with QUIT as the prefix.
-            final String checkpointName = CHECKPOINT_NAME_QUIT_PREFIX + UUID.randomUUID().toString();
-            logger.debug("onUnscheduled: Calling initiateCheckpoint(checkpointName={})", new Object[]{checkpointName});
-            CompletableFuture<Checkpoint> checkpointFuture = readerGroup.initiateCheckpoint(checkpointName, scheduler);
+//            final String checkpointName = CHECKPOINT_NAME_FINAL_PREFIX + UUID.randomUUID().toString();
+//            logger.debug("onUnscheduled: Calling performCheckpoint(checkpointName={})", new Object[]{checkpointName});
+//            CompletableFuture<Checkpoint> checkpointFuture = readerGroup.initiateCheckpoint(checkpointName, scheduler);
+            performCheckpoint(true);
         }
     }
 
@@ -372,7 +376,7 @@ public class ConsumerPool implements AutoCloseable {
         private volatile boolean closedConsumer;
 
         private SimpleConsumerLease(final EventStreamReader<byte[]> reader) {
-            super(maxWaitMillis, reader, readerFactory, writerFactory, logger);
+            super(reader, readerFactory, writerFactory, logger);
             this.reader = reader;
         }
 
