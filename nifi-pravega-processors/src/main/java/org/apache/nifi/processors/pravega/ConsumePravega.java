@@ -179,7 +179,7 @@ public class ConsumePravega extends AbstractPravegaProcessor {
                 } else {
                     try {
                         if (this.isScheduled()) {
-                            if (!lease.readEventsUntilCheckpoint()) {
+                            if (!lease.readEvents()) {
                                 context.yield();
                             }
                         }

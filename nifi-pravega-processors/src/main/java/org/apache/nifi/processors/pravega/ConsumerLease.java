@@ -62,13 +62,12 @@ public abstract class ConsumerLease implements Closeable {
     private boolean gotQuitSignal = false;
 
     /**
-     * Executes readNextEvent's on the underlying Pravega Reader and creates any new
-     * flowfiles necessary.
+     * Reads events from the Pravega reader and creates FlowFiles.
      *
      * @return false if calling onTrigger should yield; otherwise true
      *
      */
-    boolean readEventsUntilCheckpoint() {
+    boolean readEvents() {
         if (gotQuitSignal) {
             return false;
         }
@@ -80,7 +79,8 @@ public abstract class ConsumerLease implements Closeable {
                     getProcessSession().commit();
                     boolean isFinalCheckpoint = eventRead.getCheckpointName().startsWith(CHECKPOINT_NAME_FINAL_PREFIX);
                     if (isFinalCheckpoint) {
-                        logger.info("readEventsUntilCheckpoint: got final checkpoint");
+                        logger.info("readEvents: got final checkpoint");
+                        // TODO: is gotQuitSignal required?
                         gotQuitSignal = true;
                         // Call readNextEvent to indicate to Pravega that we are done with the checkpoint.
                         // The result will be discarded;

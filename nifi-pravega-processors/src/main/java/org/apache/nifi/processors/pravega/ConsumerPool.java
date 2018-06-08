@@ -109,18 +109,18 @@ public class ConsumerPool implements AutoCloseable {
         this.readerFactory = readerFactory;
         this.writerFactory = writerFactory;
 
-        boolean primaryNode = isPrimaryNode.get();
+        final boolean primaryNode = isPrimaryNode.get();
+        final StateMap stateMap = stateManager.getState(Scope.CLUSTER);
+        final String previousReaderGroup = stateMap.get(STATE_KEY_READER_GROUP);
+        final boolean haveReaderGroup = previousReaderGroup != null;
+        final String checkpointStr = stateMap.get(STATE_KEY_CHECKPOINT_BASE64);
+        final boolean haveCheckpoint = checkpointStr != null;
 
-        StateMap stateMap = stateManager.getState(Scope.CLUSTER);
-        Map<String, String> state = stateMap.toMap();
-        boolean havePreviousState = !state.isEmpty();
-
-        if (!havePreviousState && !primaryNode) {
-            throw new RuntimeException("Non-primary node can't start until state exists. Try again later.");
+        if (!haveReaderGroup && !primaryNode) {
+            throw new RuntimeException("Non-primary node can't start until the reader group has been created.");
         }
 
         pooledLeases = new ArrayBlockingQueue<>(maxConcurrentLeases);
-
         clientFactory = ClientFactory.withScope(scope, controllerURI);
         try {
             // Thread pool must be at least 2 because scheduled thread needs to wait for another thread.
@@ -129,41 +129,7 @@ public class ConsumerPool implements AutoCloseable {
                 // Create reader group manager.
                 readerGroupManager = ReaderGroupManager.withScope(scope, controllerURI);
                 try {
-                    if (!havePreviousState) {
-                        if (!(!havePreviousState && primaryNode)) {
-                            throw new RuntimeException("bug");
-                        }
-                        // This processor is starting for the first time on the primary node.
-                        readerGroupName = UUID.randomUUID().toString().replace("-", "");
-                        logger.debug("ConsumerPool: Using new reader group {}", new Object[]{readerGroupName});
-
-                        // Create streams.
-                        try (final StreamManager streamManager = StreamManager.create(controllerURI)) {
-                            streamManager.createScope(scope);
-                            for (String streamName : streamNames) {
-                                streamManager.createStream(scope, streamName, streamConfig);
-                            }
-                        }
-
-                        // Determine starting stream cuts.
-                        final Map<Stream, StreamCut> startingStreamCuts = new HashMap<>();
-                        for (String streamName : streamNames) {
-                            Stream stream = Stream.of(scope, streamName);
-                            // TODO: get tail stream cut if requested
-                            startingStreamCuts.put(stream, StreamCut.UNBOUNDED);
-                        }
-
-                        // Create reader group.
-                        final ReaderGroupConfig readerGroupConfig = ReaderGroupConfig.builder()
-                                .startFromStreamCuts(startingStreamCuts)
-                                .disableAutomaticCheckpoints()
-                                .build();
-                        readerGroupManager.createReaderGroup(readerGroupName, readerGroupConfig);
-                        readerGroup = readerGroupManager.getReaderGroup(readerGroupName);
-                    } else {
-                        if (!havePreviousState) {
-                            throw new RuntimeException("bug");
-                        }
+                    if (haveReaderGroup) {
                         // Use the reader group from the previous state.
                         logger.debug("ConsumerPool: previous state={}", new Object[]{stateMap.toMap()});
                         final String prevReaderGroupName = stateMap.get(STATE_KEY_READER_GROUP);
@@ -173,27 +139,42 @@ public class ConsumerPool implements AutoCloseable {
                         readerGroupName = prevReaderGroupName;
                         logger.debug("ConsumerPool: Using existing reader group {}", new Object[]{readerGroupName});
                         readerGroup = readerGroupManager.getReaderGroup(readerGroupName);
-                        try {
-                            if (primaryNode) {
-                                if (!(havePreviousState && primaryNode)) {
-                                    throw new RuntimeException("bug");
-                                }
-                                // This could occur if user stopped and started this processor.
-                                // Use previous group and reset it to our checkpoint.
-                                // The primary node will be responsible for resetting the reader group.
-                                final String checkpointStr = stateMap.get(STATE_KEY_CHECKPOINT_BASE64);
-                                logger.debug("ConsumerPool: Resetting the reader group to checkpoint {}", new Object[]{checkpointStr});
-                                final Checkpoint checkpoint = Checkpoint.fromBytes(ByteBuffer.wrap(Base64.getDecoder().decode(checkpointStr)));
-                                final ReaderGroupConfig readerGroupConfig = ReaderGroupConfig.builder()
-                                        .startFromCheckpoint(checkpoint)
-                                        .disableAutomaticCheckpoints()
-                                        .build();
-                                readerGroup.resetReaderGroup(readerGroupConfig);
-                            }
-                        } catch (Exception e) {
-                            readerGroup.close();
-                            throw e;
+                    } else {
+                        if (!primaryNode) {
+                            throw new RuntimeException("bug");
                         }
+                        // This processor is starting for the first time on the primary node.
+
+                        // Create streams.
+                        try (final StreamManager streamManager = StreamManager.create(controllerURI)) {
+                            streamManager.createScope(scope);
+                            for (String streamName : streamNames) {
+                                streamManager.createStream(scope, streamName, streamConfig);
+                            }
+                        }
+
+                        // Create reader group.
+                        readerGroupName = UUID.randomUUID().toString().replace("-", "");
+                        logger.debug("ConsumerPool: Using new reader group {}", new Object[]{readerGroupName});
+                        ReaderGroupConfig.ReaderGroupConfigBuilder builder = ReaderGroupConfig.builder()
+                                .disableAutomaticCheckpoints();
+                        if (haveCheckpoint) {
+                            logger.debug("ConsumerPool: Starting the reader group from checkpoint {}", new Object[]{checkpointStr});
+                            final Checkpoint checkpoint = Checkpoint.fromBytes(ByteBuffer.wrap(Base64.getDecoder().decode(checkpointStr)));
+                            builder = builder.startFromCheckpoint(checkpoint);
+                        } else {
+                            // Determine starting stream cuts.
+                            final Map<Stream, StreamCut> startingStreamCuts = new HashMap<>();
+                            for (String streamName : streamNames) {
+                                Stream stream = Stream.of(scope, streamName);
+                                // TODO: get tail stream cut if requested
+                                startingStreamCuts.put(stream, StreamCut.UNBOUNDED);
+                            }
+                            builder = builder.startFromStreamCuts(startingStreamCuts);
+                        }
+                        final ReaderGroupConfig readerGroupConfig = builder.build();
+                        readerGroupManager.createReaderGroup(readerGroupName, readerGroupConfig);
+                        readerGroup = readerGroupManager.getReaderGroup(readerGroupName);
                     }
                 } catch (Exception e) {
                     readerGroupManager.close();
@@ -218,27 +199,28 @@ public class ConsumerPool implements AutoCloseable {
 //    private volatile boolean stopCheckpointing = false;
     private final Object checkpointMutex = new Object();
 
-    void performRegularCheckpoint() {
+    private void performRegularCheckpoint() {
         performCheckpoint(false);
     }
 
-    void performCheckpoint(boolean isFinal) {
+    private void performCheckpoint(boolean isFinal) {
         synchronized (checkpointMutex) {
             try {
-                if (isPrimaryNode.get()) {
+                if (isFinal || isPrimaryNode.get()) {
                     final String checkpointName = (isFinal ? CHECKPOINT_NAME_FINAL_PREFIX : "") + UUID.randomUUID().toString();
                     logger.debug("performCheckpoint: Calling initiateCheckpoint; checkpointName={}", new Object[]{checkpointName});
                     CompletableFuture<Checkpoint> checkpointFuture = readerGroup.initiateCheckpoint(checkpointName, scheduler);
                     logger.debug("performCheckpoint: Got future.");
                     Checkpoint checkpoint = checkpointFuture.get();
                     logger.debug("performCheckpoint: Checkpoint completed; checkpoint={}, positions={}", new Object[]{checkpoint, checkpoint.asImpl().getPositions()});
-                    if (isPrimaryNode.get()) {
+                    if (isFinal || isPrimaryNode.get()) {
                         // Get serialized checkpoint byte array and convert to base64 string.
                         String checkpointStr = new String(Base64.getEncoder().encode(checkpoint.toBytes().array()));
                         Map<String, String> mapState = new HashMap<>();
-//                        if (!isFinal) {
+                        // The final checkpoint does not have a reader group.
+                        if (!isFinal) {
                             mapState.put(STATE_KEY_READER_GROUP, readerGroupName);
-//                        }
+                        }
                         mapState.put(STATE_KEY_CHECKPOINT_BASE64, checkpointStr);
                         mapState.put(STATE_KEY_CHECKPOINT_NAME, checkpoint.getName());
                         mapState.put(STATE_KEY_CHECKPOINT_TIME, ZonedDateTime.now(ZoneOffset.UTC).format(DateTimeFormatter.ISO_INSTANT));
@@ -257,37 +239,19 @@ public class ConsumerPool implements AutoCloseable {
 
     final static String CHECKPOINT_NAME_FINAL_PREFIX = "FINAL-";
 
+    /**
+     * We want to gracefully stop this processor.
+     * This means that the last checkpoint written to the state must
+     * represent exactly what each onTrigger thread on each node committed to each session.
+     * If any checkpoint is in progress, then it is possible for some threads to already have committed their session.
+     * Therefore, if any checkpoint is in progress, we want to wait for it and ensure that another one does not start.
+     *
+     */
     public void onUnscheduled(final ProcessContext context) {
-        // TODO: this is not working correctly
-        // We want to gracefully stop this processor.
-        // This means that the last checkpoint written to the state must
-        // represent exactly what each onTrigger thread on each node committed to each session.
-        // If any checkpoint is in progress, then it is possible for some threads to already have committed their session.
-        // Therefore, if any checkpoint is in progress, we want to wait for it and ensure that another one does not start.
-        // However, it is also possible that onTrigger is no longer scheduled, leaving a reader idle and not
-        // progressing toward the checkpoint.
-        // To work around this issue, onTrigger does not return until the QUIT signal is received.
-        // TODO: Another option is to open a new session and flush to it. Which method is better?
-
         if (isPrimaryNode.get()) {
-            // If a checkpoint is in progress, wait for it to complete.
-            // Also prevent any future checkpoints from occurring.
-//            logger.debug("onUnscheduled: waiting for checkpoint mutex");
-//            synchronized (checkpointMutex) {
-//                logger.debug("onUnscheduled: got checkpoint mutex");
-//                stopCheckpointing = true;
-//            }
-
-            // We must now have the guarantee that no checkpoints are in progress and that no checkpoints will be initiated.
-            // Then we no longer need onTrigger to run.
-            // However, onTrigger threads are likely already running and we need them to terminate quickly.
-
-            // Send a QUIT signal to all readers.
-            // We do this by using a checkpoint name with QUIT as the prefix.
-//            final String checkpointName = CHECKPOINT_NAME_FINAL_PREFIX + UUID.randomUUID().toString();
-//            logger.debug("onUnscheduled: Calling performCheckpoint(checkpointName={})", new Object[]{checkpointName});
-//            CompletableFuture<Checkpoint> checkpointFuture = readerGroup.initiateCheckpoint(checkpointName, scheduler);
             performCheckpoint(true);
+            // Delete reader group.
+            readerGroupManager.deleteReaderGroup(readerGroupName);
         }
     }
 
@@ -309,7 +273,7 @@ public class ConsumerPool implements AutoCloseable {
             /**
              * For now return a new consumer lease. But we could later elect to
              * have this return null if we determine the broker indicates that
-             * the lag time on all streamNames being monitored is sufficiently low.
+             * the lag time on all streams being monitored is sufficiently low.
              * For now we should encourage conservative use of threads because
              * having too many means we'll have at best useless threads sitting
              * around doing frequent network calls and at worst having consumers
