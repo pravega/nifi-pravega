@@ -8,6 +8,7 @@ import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.SeeAlso;
 import org.apache.nifi.annotation.documentation.Tags;
 import org.apache.nifi.annotation.lifecycle.OnStopped;
+import org.apache.nifi.annotation.lifecycle.OnUnscheduled;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.components.state.Scope;
 import org.apache.nifi.logging.ComponentLog;
@@ -94,20 +95,21 @@ public class ConsumePravega extends AbstractPravegaProcessor {
     @Override
     protected void init(final ProcessorInitializationContext context) {
         super.init(context);
-        // TODO: is this needed?
-//        scheduler = Executors.newScheduledThreadPool(1);
     }
 
-//    @OnUnscheduled
-//    public void onUnscheduled(final ProcessContext context) {
-//        ConsumerPool pool = consumerPool;
-//        if (pool != null) {
-//            pool.onUnscheduled(context);
-//        }
-//    }
+    @OnUnscheduled
+    public void onUnscheduled(final ProcessContext context) {
+        logger.info("onUnscheduled: BEGIN");
+        ConsumerPool pool = consumerPool;
+        if (pool != null) {
+            pool.onUnscheduled(context);
+        }
+        logger.info("onUnscheduled: END");
+    }
 
     @OnStopped
-    public void close() {
+    public void close(final ProcessContext context) {
+        logger.info("close: BEGIN");
         ConsumerPool pool;
         synchronized (this) {
             pool = consumerPool;
@@ -116,6 +118,7 @@ public class ConsumePravega extends AbstractPravegaProcessor {
         if (pool != null) {
             pool.close();
         }
+        logger.info("close: END");
     }
 
     private synchronized ConsumerPool getConsumerPool(final ProcessContext context) {
@@ -165,33 +168,30 @@ public class ConsumePravega extends AbstractPravegaProcessor {
 
     @Override
     public void onTrigger(ProcessContext context, ProcessSession session) throws ProcessException {
+        logger.debug("onTrigger : BEGIN");
         final ConsumerPool pool = getConsumerPool(context);
         if (pool == null) {
             context.yield();
-            return;
-        }
-
-        try (final ConsumerLease lease = pool.obtainConsumer(session, context)) {
-            if (lease == null) {
-                context.yield();
-                return;
-            }
-//            if (lease.gotFinalCheckpoint()) {
-//                context.yield();
-//                return;
-//            }
-            try {
-                while (this.isScheduled()) {
-                    lease.readEventsUntilCheckpoint();
+        } else {
+            try (final ConsumerLease lease = pool.obtainConsumer(session, context)) {
+                if (lease == null) {
+                    context.yield();
+                } else {
+                    try {
+                        if (this.isScheduled()) {
+                            if (!lease.readEventsUntilCheckpoint()) {
+                                context.yield();
+                            }
+                        }
+                    } catch (final Throwable t) {
+                        logger.error("Exception while processing data from Pravega so will close the lease {} due to {}",
+                                new Object[]{lease, t}, t);
+                        context.yield();
+                    }
                 }
-//                if (this.isScheduled() && !lease.commit()) {
-//                    context.yield();
-//                }
-            } catch (final Throwable t) {
-                getLogger().error("Exception while processing data from Pravega so will close the lease {} due to {}",
-                        new Object[]{lease, t}, t);
             }
         }
+        logger.debug("onTrigger : END");
     }
 
 }

@@ -33,6 +33,7 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import static org.apache.nifi.processors.pravega.ConsumePravega.REL_SUCCESS;
+import static org.apache.nifi.processors.pravega.ConsumerPool.CHECKPOINT_NAME_QUIT_PREFIX;
 
 /**
  * This class represents a lease to access a Pravega Reader object. The lease is
@@ -77,39 +78,50 @@ public abstract class ConsumerLease implements Closeable {
 //        totalMessages = 0;
     }
 
+    boolean gotQuitSignal = false;
+
     /**
-     * Executes a readEventsUntilCheckpoint on the underlying Pravega Reader and creates any new
+     * Executes readNextEvent's on the underlying Pravega Reader and creates any new
      * flowfiles necessary.
+     *
+     * @return false if calling onTrigger should yield; otherwise true
+     *
      */
-    void readEventsUntilCheckpoint() {
+    boolean readEventsUntilCheckpoint() {
+        if (gotQuitSignal) {
+            return false;
+        }
         try {
             while (true) {
                 final long READER_TIMEOUT_MS = 10000;
                 final EventRead<byte[]> eventRead = pravegaReader.readNextEvent(READER_TIMEOUT_MS);
                 if (eventRead.isCheckpoint()) {
-                    commit();
-                    // Call readNextEvent to indicate to Pravega that we are done with the checkpoint.
-                    // We do not want the result now.
-                    pravegaReader.readNextEvent(0);
-                    break;
-//                    lastPollEmpty = false;
-//                    if (eventRead.getCheckpointName() == "FINAL") {
-//                        gotFinalCheckpoint = true;
-//                        pravegaReader.readNextEvent(0);
-//                        break;
-//                    }
-                } else if (eventRead.getEvent() == null) {
-                    throw new ProcessException("readNextEvent timed out; processed events will be rolled back");
-//                    lastPollEmpty = true;
-//                    break;
+                    // If this is a QUIT checkpoint, we rollback and exit.
+                    boolean isQuitSignal = eventRead.getCheckpointName().startsWith(CHECKPOINT_NAME_QUIT_PREFIX);
+                    if (isQuitSignal) {
+                        gotQuitSignal = true;
+                        logger.info("readEventsUntilCheckpoint: got QUIT signal");
+                        // Call readNextEvent to indicate to Pravega that we are done with the checkpoint.
+                        // The result will be discarded;
+                        pravegaReader.readNextEvent(0);
+                        // Ensure that this reader does not get reused.
+                        this.poison();
+                        return false;
+                    } else {
+                        getProcessSession().commit();
+                        return true;
                     }
-                else {
-//                    lastPollEmpty = false;
+                } else if (eventRead.getEvent() == null) {
+                    // Timeout occurred.
+                    // We do not expect this to happen until the processor is stopping and periodic checkpoints have stopped.
+                    this.poison();
+                    throw new ProcessException("readNextEvent timed out; processed events will be rolled back");
+                } else {
                     processEvent(eventRead);
                 }
             }
         }
-        catch (ReinitializationRequiredException e) {
+        catch (final ReinitializationRequiredException e) {
             // This reader must be closed so that a new one can be created.
             this.poison();
             throw new ProcessException(e);
@@ -120,60 +132,6 @@ public abstract class ConsumerLease implements Closeable {
             throw t;
         }
     }
-
-    /**
-     * if false then we didn't do anything and should probably yield if true
-     * then we committed new data
-     *
-     */
-    boolean commit() {
-        try {
-            logger.debug("commit");
-            getProcessSession().commit();
-            // TODO: when to return false?
-            return true;
-        } catch (final Throwable t) {
-            poison();
-            throw t;
-        }
-    }
-
-//    /**
-//     * Indicates whether we should continue polling for data.
-//     * We must be very mindful of memory usage for
-//     * the flow file objects (not their content) being held in memory. The
-//     * content of Pravega events will be written to the content repository
-//     * immediately upon each readEventsUntilCheckpoint call but we must still be mindful of how much
-//     * memory can be used in each readEventsUntilCheckpoint call. We will indicate that we should
-//     * stop polling our last readEventsUntilCheckpoint call produced no new results or if we've been
-//     * polling and processing data longer than the specified maximum polling
-//     * time or if we have reached out specified max flow file limit;
-//     * otherwise true.
-//     *
-//     * @return true if should keep polling; false otherwise
-//     */
-//    boolean continuePolling() {
-//        // stop if the last readEventsUntilCheckpoint produced new no data
-//        if (lastPollEmpty) {
-//            return false;
-//        }
-//
-//        // stop if we've gone past our desired max uncommitted wait time
-//        if (leaseStartNanos < 0) {
-//            leaseStartNanos = System.nanoTime();
-//        }
-//        final long durationMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - leaseStartNanos);
-//        if (durationMillis > maxWaitMillis) {
-//            return false;
-//        }
-//
-//        // stop if we've generated enough flowfiles that we need to be concerned about memory usage for the objects
-//        return totalMessages < 1000; // admittedlly a magic number - good candidate for processor property
-//    }
-
-//    boolean gotFinalCheckpoint() {
-//        return gotFinalCheckpoint;
-//    }
 
     /**
      * Indicates that the underlying session and consumer should be immediately
