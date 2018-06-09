@@ -7,8 +7,8 @@ import org.apache.nifi.components.ValidationContext;
 import org.apache.nifi.components.ValidationResult;
 import org.apache.nifi.components.Validator;
 import org.apache.nifi.logging.ComponentLog;
-import org.apache.nifi.processor.AbstractProcessor;
-import org.apache.nifi.processor.ProcessorInitializationContext;
+import org.apache.nifi.processor.*;
+import org.apache.nifi.processor.exception.ProcessException;
 import org.apache.nifi.processor.util.StandardValidators;
 
 import java.net.URI;
@@ -16,7 +16,7 @@ import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.List;
 
-public abstract class AbstractPravegaProcessor extends AbstractProcessor {
+public abstract class AbstractPravegaProcessor extends AbstractSessionFactoryProcessor {
     static final Validator CONTROLLER_VALIDATOR = new Validator() {
         @Override
         public ValidationResult validate(String subject, String input, ValidationContext context) {
@@ -58,25 +58,31 @@ public abstract class AbstractPravegaProcessor extends AbstractProcessor {
         return descriptors;
     }
 
-    private volatile boolean primaryNode = false;
-
     @Override
     protected void init(final ProcessorInitializationContext context) {
         logger = getLogger();
-//        final boolean isClustered = context.getNodeTypeProvider().isClustered();
-//        final boolean isPrimary = context.getNodeTypeProvider().isPrimary();
-//        logger.debug("init: this={}, isClustered={}, isPrimary={}",
-//                new Object[]{System.identityHashCode(this), isClustered, isPrimary});
-//        primaryNode = (!isClustered) || isPrimary;
-//        logger.debug("init: this={}, primaryNode={}",
-//                new Object[]{System.identityHashCode(this), primaryNode});
     }
 
-//    @OnPrimaryNodeStateChange
-//    public void onPrimaryNodeStateChange(PrimaryNodeState state) {
-//        logger.info("onPrimaryNodeStateChange: state={}", new Object[]{state});
-//        primaryNode = state == PrimaryNodeState.ELECTED_PRIMARY_NODE;
+//    private ProcessSessionFactory sessionFactory;
+//
+//    public ProcessSessionFactory getProcessSessionFactory() {
+//        return sessionFactory;
 //    }
+
+    @Override
+    public void onTrigger(final ProcessContext context, final ProcessSessionFactory sessionFactory) throws ProcessException {
+//        this.sessionFactory = sessionFactory;
+        final ProcessSession session = sessionFactory.createSession();
+        try {
+            onTrigger(context, sessionFactory, session);
+            session.commit();
+        } catch (final Throwable t) {
+            session.rollback(true);
+            throw t;
+        }
+    }
+
+    public abstract void onTrigger(final ProcessContext context, final ProcessSessionFactory sessionFactory, final ProcessSession session) throws ProcessException;
 
     public boolean isPrimaryNode() {
         final boolean isPrimary = getNodeTypeProvider().isPrimary();

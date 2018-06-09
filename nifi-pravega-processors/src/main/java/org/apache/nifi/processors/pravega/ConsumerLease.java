@@ -90,9 +90,10 @@ public abstract class ConsumerLease implements Closeable {
                         this.poison();
                         return false;
                     }
+                    return true;
                 } else if (eventRead.getEvent() == null) {
-                    // Timeout occurred. We just log this and continue the read loop.
-                    logger.info("timeout waiting for next event");
+                    logger.warn("timeout waiting for checkpoint");
+                    return true;
                 } else {
                     processEvent(eventRead);
                 }

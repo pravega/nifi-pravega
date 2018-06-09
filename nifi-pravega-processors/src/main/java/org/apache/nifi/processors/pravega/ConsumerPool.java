@@ -27,6 +27,7 @@ import org.apache.nifi.components.state.StateMap;
 import org.apache.nifi.logging.ComponentLog;
 import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.ProcessSession;
+import org.apache.nifi.processor.ProcessSessionFactory;
 import org.apache.nifi.serialization.RecordReaderFactory;
 import org.apache.nifi.serialization.RecordSetWriterFactory;
 
@@ -66,6 +67,7 @@ public class ConsumerPool implements AutoCloseable {
     private final ReaderGroup readerGroup;
     private final ScheduledExecutorService scheduler;
     private final StateManager stateManager;
+    private final ProcessSessionFactory sessionFactory;
     private final Supplier<Boolean> isPrimaryNode;
 
     static private final String STATE_KEY_READER_GROUP = "reader.group.name";
@@ -89,6 +91,7 @@ public class ConsumerPool implements AutoCloseable {
     public ConsumerPool(
             final ComponentLog logger,
             final StateManager stateManager,
+            final ProcessSessionFactory sessionFactory,
             final Supplier<Boolean> isPrimaryNode,
             final int maxConcurrentLeases,
             final long maxWaitMillis,
@@ -100,6 +103,7 @@ public class ConsumerPool implements AutoCloseable {
             final RecordSetWriterFactory writerFactory) throws Exception {
         this.logger = logger;
         this.stateManager = stateManager;
+        this.sessionFactory = sessionFactory;
         this.isPrimaryNode = isPrimaryNode;
         this.maxWaitMillis = maxWaitMillis;
         this.controllerURI = controllerURI;
@@ -196,14 +200,20 @@ public class ConsumerPool implements AutoCloseable {
         scheduler.schedule(this::performRegularCheckpoint, 1000, TimeUnit.MILLISECONDS);
     }
 
-//    private volatile boolean stopCheckpointing = false;
     private final Object checkpointMutex = new Object();
 
     private void performRegularCheckpoint() {
-        performCheckpoint(false);
+        performCheckpoint(false, null);
     }
 
-    private void performCheckpoint(boolean isFinal) {
+    /**
+     * Perform a checkpoint, wait for it to complete, and write the checkpoint to the state.
+     *
+     * @param isFinal If true, the processor is shutting down and this is the primary node.
+     *                This will be the final checkpoint.
+     * @param context Required if isFinal is true.
+     */
+    private void performCheckpoint(final boolean isFinal, final ProcessContext context) {
         synchronized (checkpointMutex) {
             try {
                 if (isFinal || isPrimaryNode.get()) {
@@ -249,10 +259,45 @@ public class ConsumerPool implements AutoCloseable {
      */
     public void onUnscheduled(final ProcessContext context) {
         if (isPrimaryNode.get()) {
-            performCheckpoint(true);
+            // onTrigger may not be executed anymore so we need to process events until the final checkpoint is reached.
+            ExecutorService drainExecutor = startDrainLeases(context);
+            try {
+                // Shutdown checkpoint scheduler so that it doesn't start a new checkpoint.
+                scheduler.shutdown();
+                try {
+                    scheduler.awaitTermination(60000, TimeUnit.MILLISECONDS);
+                } catch (InterruptedException e) {
+                    logger.error("onUnscheduled", e);
+                }
+                performCheckpoint(true, context);
+            } finally {
+                drainExecutor.shutdown();
+            }
             // Delete reader group.
             readerGroupManager.deleteReaderGroup(readerGroupName);
         }
+    }
+
+    // In case no onTrigger threads are running, we go through each lease and run it until the final checkpoint is received.
+    private ExecutorService startDrainLeases(final ProcessContext context) {
+        ScheduledExecutorService drainExecutor = Executors.newScheduledThreadPool(1);
+        // TODO: do more than one?
+        drainExecutor.scheduleWithFixedDelay(() -> drainLeases(context), 0, 1000, TimeUnit.MILLISECONDS);
+        return drainExecutor;
+    }
+
+    private void drainLeases(final ProcessContext context) {
+        logger.debug("drainLeases: BEGIN");
+        for (;;) {
+            final SimpleConsumerLease lease = pooledLeases.poll();
+            if (lease == null) {
+                break;
+            }
+            final ProcessSession session = sessionFactory.createSession();
+            lease.setProcessSession(session, context);
+            lease.readEvents();
+        }
+        logger.debug("drainLeases: END");
     }
 
     /**
@@ -266,6 +311,7 @@ public class ConsumerPool implements AutoCloseable {
      * @return consumer to use or null if not available or necessary
      */
     public ConsumerLease obtainConsumer(final ProcessSession session, final ProcessContext processContext) {
+        // Attempt to get lease (reader) from queue.
         SimpleConsumerLease lease = pooledLeases.poll();
         if (lease == null) {
             final EventStreamReader<byte[]> reader = createPravegaReader();
@@ -281,6 +327,7 @@ public class ConsumerPool implements AutoCloseable {
              */
             lease = new SimpleConsumerLease(reader);
         }
+        // Bind the reader in the lease to this session.
         lease.setProcessSession(session, processContext);
 
         leasesObtainedCountRef.incrementAndGet();

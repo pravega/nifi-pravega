@@ -12,10 +12,7 @@ import org.apache.nifi.annotation.lifecycle.OnUnscheduled;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.components.state.Scope;
 import org.apache.nifi.logging.ComponentLog;
-import org.apache.nifi.processor.ProcessContext;
-import org.apache.nifi.processor.ProcessSession;
-import org.apache.nifi.processor.ProcessorInitializationContext;
-import org.apache.nifi.processor.Relationship;
+import org.apache.nifi.processor.*;
 import org.apache.nifi.processor.exception.ProcessException;
 import org.apache.nifi.processor.util.StandardValidators;
 
@@ -121,16 +118,16 @@ public class ConsumePravega extends AbstractPravegaProcessor {
         logger.info("close: END");
     }
 
-    private synchronized ConsumerPool getConsumerPool(final ProcessContext context) {
+    private synchronized ConsumerPool getConsumerPool(final ProcessContext context, final ProcessSessionFactory sessionFactory) {
         ConsumerPool pool = consumerPool;
         if (pool != null) {
             return pool;
         }
 
-        return consumerPool = createConsumerPool(context, getLogger());
+        return consumerPool = createConsumerPool(context, sessionFactory, getLogger());
     }
 
-    protected ConsumerPool createConsumerPool(final ProcessContext context, final ComponentLog log) {
+    protected ConsumerPool createConsumerPool(final ProcessContext context, final ProcessSessionFactory sessionFactory, final ComponentLog log) {
         final int maxLeases = context.getMaxConcurrentTasks();
         final long maxUncommittedTime = context.getProperty(MAX_UNCOMMITTED_TIME).asTimePeriod(TimeUnit.MILLISECONDS);
         URI controllerURI;
@@ -152,6 +149,7 @@ public class ConsumePravega extends AbstractPravegaProcessor {
             return new ConsumerPool(
                     log,
                     context.getStateManager(),
+                    sessionFactory,
                     this::isPrimaryNode,
                     maxLeases,
                     maxUncommittedTime,
@@ -167,9 +165,9 @@ public class ConsumePravega extends AbstractPravegaProcessor {
     }
 
     @Override
-    public void onTrigger(ProcessContext context, ProcessSession session) throws ProcessException {
+    public void onTrigger(final ProcessContext context, final ProcessSessionFactory sessionFactory, final ProcessSession session) throws ProcessException {
         logger.debug("onTrigger : BEGIN");
-        final ConsumerPool pool = getConsumerPool(context);
+        final ConsumerPool pool = getConsumerPool(context, sessionFactory);
         if (pool == null) {
             context.yield();
         } else {
