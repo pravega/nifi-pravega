@@ -96,12 +96,10 @@ public class ConsumePravega extends AbstractPravegaProcessor {
 
     @OnUnscheduled
     public void onUnscheduled(final ProcessContext context) {
-        logger.info("onUnscheduled: BEGIN");
         ConsumerPool pool = consumerPool;
         if (pool != null) {
-            pool.onUnscheduled(context);
+            pool.gracefulShutdown(context);
         }
-        logger.info("onUnscheduled: END");
     }
 
     @OnStopped
@@ -166,7 +164,7 @@ public class ConsumePravega extends AbstractPravegaProcessor {
 
     @Override
     public void onTrigger(final ProcessContext context, final ProcessSessionFactory sessionFactory, final ProcessSession session) throws ProcessException {
-        logger.debug("onTrigger : BEGIN");
+        logger.debug("onTrigger: BEGIN");
         final ConsumerPool pool = getConsumerPool(context, sessionFactory);
         if (pool == null) {
             context.yield();
@@ -189,7 +187,7 @@ public class ConsumePravega extends AbstractPravegaProcessor {
                 }
             }
         }
-        logger.debug("onTrigger : END");
+        logger.debug("onTrigger: END");
     }
 
 }

@@ -1,11 +1,10 @@
 package org.apache.nifi.processors.pravega;
 
-import org.apache.nifi.annotation.notification.OnPrimaryNodeStateChange;
-import org.apache.nifi.annotation.notification.PrimaryNodeState;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.components.ValidationContext;
 import org.apache.nifi.components.ValidationResult;
 import org.apache.nifi.components.Validator;
+import org.apache.nifi.controller.NodeTypeProvider;
 import org.apache.nifi.logging.ComponentLog;
 import org.apache.nifi.processor.*;
 import org.apache.nifi.processor.exception.ProcessException;
@@ -63,15 +62,8 @@ public abstract class AbstractPravegaProcessor extends AbstractSessionFactoryPro
         logger = getLogger();
     }
 
-//    private ProcessSessionFactory sessionFactory;
-//
-//    public ProcessSessionFactory getProcessSessionFactory() {
-//        return sessionFactory;
-//    }
-
     @Override
     public void onTrigger(final ProcessContext context, final ProcessSessionFactory sessionFactory) throws ProcessException {
-//        this.sessionFactory = sessionFactory;
         final ProcessSession session = sessionFactory.createSession();
         try {
             onTrigger(context, sessionFactory, session);
@@ -85,9 +77,13 @@ public abstract class AbstractPravegaProcessor extends AbstractSessionFactoryPro
     public abstract void onTrigger(final ProcessContext context, final ProcessSessionFactory sessionFactory, final ProcessSession session) throws ProcessException;
 
     public boolean isPrimaryNode() {
-        final boolean isPrimary = getNodeTypeProvider().isPrimary();
-        logger.info("getNodeTypeProvider().isPrimary()={}", new Object[]{isPrimary});
-        return isPrimary;
+        final NodeTypeProvider provider = getNodeTypeProvider();
+        final boolean isClustered = provider.isClustered();
+        final boolean isPrimary = provider.isPrimary();
+        final boolean isPrimaryNode = (!isClustered) || isPrimary;
+        logger.debug("isPrimaryNode: isClustered={}, isPrimary={}, isPrimaryNode={}",
+                new Object[]{isClustered, isPrimary, isPrimaryNode});
+        return isPrimaryNode;
     }
 
     /**

@@ -65,7 +65,8 @@ public class ConsumerPool implements AutoCloseable {
     private final ClientFactory clientFactory;
     private final ReaderGroupManager readerGroupManager;
     private final ReaderGroup readerGroup;
-    private final ScheduledExecutorService scheduler;
+    private final ScheduledExecutorService performCheckpointExecutor;
+    private final ScheduledExecutorService initiateCheckpointExecutor;
     private final StateManager stateManager;
     private final ProcessSessionFactory sessionFactory;
     private final Supplier<Boolean> isPrimaryNode;
@@ -127,65 +128,70 @@ public class ConsumerPool implements AutoCloseable {
         pooledLeases = new ArrayBlockingQueue<>(maxConcurrentLeases);
         clientFactory = ClientFactory.withScope(scope, controllerURI);
         try {
-            // Thread pool must be at least 2 because scheduled thread needs to wait for another thread.
-            scheduler = Executors.newScheduledThreadPool(3);
+            performCheckpointExecutor = Executors.newScheduledThreadPool(1);
             try {
-                // Create reader group manager.
-                readerGroupManager = ReaderGroupManager.withScope(scope, controllerURI);
+                initiateCheckpointExecutor = Executors.newScheduledThreadPool(1);
                 try {
-                    if (haveReaderGroup) {
-                        // Use the reader group from the previous state.
-                        logger.debug("ConsumerPool: previous state={}", new Object[]{stateMap.toMap()});
-                        final String prevReaderGroupName = stateMap.get(STATE_KEY_READER_GROUP);
-                        if (prevReaderGroupName == null || prevReaderGroupName.isEmpty()) {
-                            throw new Exception("State is missing the reader group name.");
-                        }
-                        readerGroupName = prevReaderGroupName;
-                        logger.debug("ConsumerPool: Using existing reader group {}", new Object[]{readerGroupName});
-                        readerGroup = readerGroupManager.getReaderGroup(readerGroupName);
-                    } else {
-                        if (!primaryNode) {
-                            throw new RuntimeException("bug");
-                        }
-                        // This processor is starting for the first time on the primary node.
-
-                        // Create streams.
-                        try (final StreamManager streamManager = StreamManager.create(controllerURI)) {
-                            streamManager.createScope(scope);
-                            for (String streamName : streamNames) {
-                                streamManager.createStream(scope, streamName, streamConfig);
+                    // Create reader group manager.
+                    readerGroupManager = ReaderGroupManager.withScope(scope, controllerURI);
+                    try {
+                        if (haveReaderGroup) {
+                            // Use the reader group from the previous state.
+                            logger.debug("ConsumerPool: previous state={}", new Object[]{stateMap.toMap()});
+                            final String prevReaderGroupName = stateMap.get(STATE_KEY_READER_GROUP);
+                            if (prevReaderGroupName == null || prevReaderGroupName.isEmpty()) {
+                                throw new Exception("State is missing the reader group name.");
                             }
-                        }
-
-                        // Create reader group.
-                        readerGroupName = UUID.randomUUID().toString().replace("-", "");
-                        logger.debug("ConsumerPool: Using new reader group {}", new Object[]{readerGroupName});
-                        ReaderGroupConfig.ReaderGroupConfigBuilder builder = ReaderGroupConfig.builder()
-                                .disableAutomaticCheckpoints();
-                        if (haveCheckpoint) {
-                            logger.debug("ConsumerPool: Starting the reader group from checkpoint {}", new Object[]{checkpointStr});
-                            final Checkpoint checkpoint = Checkpoint.fromBytes(ByteBuffer.wrap(Base64.getDecoder().decode(checkpointStr)));
-                            builder = builder.startFromCheckpoint(checkpoint);
+                            readerGroupName = prevReaderGroupName;
+                            logger.debug("ConsumerPool: Using existing reader group {}", new Object[]{readerGroupName});
+                            readerGroup = readerGroupManager.getReaderGroup(readerGroupName);
                         } else {
-                            // Determine starting stream cuts.
-                            final Map<Stream, StreamCut> startingStreamCuts = new HashMap<>();
-                            for (String streamName : streamNames) {
-                                Stream stream = Stream.of(scope, streamName);
-                                // TODO: get tail stream cut if requested
-                                startingStreamCuts.put(stream, StreamCut.UNBOUNDED);
+                            if (!primaryNode) {
+                                throw new RuntimeException("bug");
                             }
-                            builder = builder.startFromStreamCuts(startingStreamCuts);
+                            // This processor is starting for the first time on the primary node.
+
+                            // Create streams.
+                            try (final StreamManager streamManager = StreamManager.create(controllerURI)) {
+                                streamManager.createScope(scope);
+                                for (String streamName : streamNames) {
+                                    streamManager.createStream(scope, streamName, streamConfig);
+                                }
+                            }
+
+                            // Create reader group.
+                            readerGroupName = UUID.randomUUID().toString().replace("-", "");
+                            logger.debug("ConsumerPool: Using new reader group {}", new Object[]{readerGroupName});
+                            ReaderGroupConfig.ReaderGroupConfigBuilder builder = ReaderGroupConfig.builder()
+                                    .disableAutomaticCheckpoints();
+                            if (haveCheckpoint) {
+                                logger.debug("ConsumerPool: Starting the reader group from checkpoint {}", new Object[]{checkpointStr});
+                                final Checkpoint checkpoint = Checkpoint.fromBytes(ByteBuffer.wrap(Base64.getDecoder().decode(checkpointStr)));
+                                builder = builder.startFromCheckpoint(checkpoint);
+                            } else {
+                                // Determine starting stream cuts.
+                                final Map<Stream, StreamCut> startingStreamCuts = new HashMap<>();
+                                for (String streamName : streamNames) {
+                                    Stream stream = Stream.of(scope, streamName);
+                                    // TODO: get tail stream cut if requested
+                                    startingStreamCuts.put(stream, StreamCut.UNBOUNDED);
+                                }
+                                builder = builder.startFromStreamCuts(startingStreamCuts);
+                            }
+                            final ReaderGroupConfig readerGroupConfig = builder.build();
+                            readerGroupManager.createReaderGroup(readerGroupName, readerGroupConfig);
+                            readerGroup = readerGroupManager.getReaderGroup(readerGroupName);
                         }
-                        final ReaderGroupConfig readerGroupConfig = builder.build();
-                        readerGroupManager.createReaderGroup(readerGroupName, readerGroupConfig);
-                        readerGroup = readerGroupManager.getReaderGroup(readerGroupName);
+                    } catch (Exception e) {
+                        readerGroupManager.close();
+                        throw e;
                     }
                 } catch (Exception e) {
-                    readerGroupManager.close();
+                    initiateCheckpointExecutor.shutdown();
                     throw e;
                 }
             } catch (Exception e) {
-                scheduler.shutdown();
+                performCheckpointExecutor.shutdown();
                 throw e;
             }
         } catch (Exception e) {
@@ -197,7 +203,7 @@ public class ConsumerPool implements AutoCloseable {
                 new Object[]{readerGroupName, scope, streamNames});
 
         // Schedule periodic task to initiate checkpoints.
-        scheduler.schedule(this::performRegularCheckpoint, 1000, TimeUnit.MILLISECONDS);
+        performCheckpointExecutor.scheduleWithFixedDelay(this::performRegularCheckpoint, 1000, 1000, TimeUnit.MILLISECONDS);
     }
 
     private final Object checkpointMutex = new Object();
@@ -214,12 +220,13 @@ public class ConsumerPool implements AutoCloseable {
      * @param context Required if isFinal is true.
      */
     private void performCheckpoint(final boolean isFinal, final ProcessContext context) {
+        logger.debug("performCheckpoint: BEGIN");
         synchronized (checkpointMutex) {
             try {
                 if (isFinal || isPrimaryNode.get()) {
                     final String checkpointName = (isFinal ? CHECKPOINT_NAME_FINAL_PREFIX : "") + UUID.randomUUID().toString();
                     logger.debug("performCheckpoint: Calling initiateCheckpoint; checkpointName={}", new Object[]{checkpointName});
-                    CompletableFuture<Checkpoint> checkpointFuture = readerGroup.initiateCheckpoint(checkpointName, scheduler);
+                    CompletableFuture<Checkpoint> checkpointFuture = readerGroup.initiateCheckpoint(checkpointName, initiateCheckpointExecutor);
                     logger.debug("performCheckpoint: Got future.");
                     Checkpoint checkpoint = checkpointFuture.get();
                     logger.debug("performCheckpoint: Checkpoint completed; checkpoint={}, positions={}", new Object[]{checkpoint, checkpoint.asImpl().getPositions()});
@@ -241,10 +248,8 @@ public class ConsumerPool implements AutoCloseable {
                 logger.warn("performCheckpoint: {}", new Object[]{e.getMessage()});
                 // Ignore error. We will retry when we are scheduled again.
             }
-            if (!isFinal) {
-                scheduler.schedule(this::performRegularCheckpoint, 1000, TimeUnit.MILLISECONDS);
-            }
         }
+        logger.debug("performCheckpoint: END");
     }
 
     final static String CHECKPOINT_NAME_FINAL_PREFIX = "FINAL-";
@@ -257,17 +262,19 @@ public class ConsumerPool implements AutoCloseable {
      * Therefore, if any checkpoint is in progress, we want to wait for it and ensure that another one does not start.
      *
      */
-    public void onUnscheduled(final ProcessContext context) {
+    public void gracefulShutdown(final ProcessContext context) {
+        logger.info("gracefulShutdown: BEGIN");
         if (isPrimaryNode.get()) {
             // onTrigger may not be executed anymore so we need to process events until the final checkpoint is reached.
             ExecutorService drainExecutor = startDrainLeases(context);
             try {
                 // Shutdown checkpoint scheduler so that it doesn't start a new checkpoint.
-                scheduler.shutdown();
+                performCheckpointExecutor.shutdown();
                 try {
-                    scheduler.awaitTermination(60000, TimeUnit.MILLISECONDS);
+                    logger.debug("gracefulShutdown: waiting for checkpoint scheduler executor to terminate");
+                    performCheckpointExecutor.awaitTermination(60000, TimeUnit.MILLISECONDS);
                 } catch (InterruptedException e) {
-                    logger.error("onUnscheduled", e);
+                    logger.error("gracefulShutdown", e);
                 }
                 performCheckpoint(true, context);
             } finally {
@@ -276,6 +283,7 @@ public class ConsumerPool implements AutoCloseable {
             // Delete reader group.
             readerGroupManager.deleteReaderGroup(readerGroupName);
         }
+        logger.info("gracefulShutdown: END");
     }
 
     // In case no onTrigger threads are running, we go through each lease and run it until the final checkpoint is received.
@@ -289,13 +297,15 @@ public class ConsumerPool implements AutoCloseable {
     private void drainLeases(final ProcessContext context) {
         logger.debug("drainLeases: BEGIN");
         for (;;) {
-            final SimpleConsumerLease lease = pooledLeases.poll();
-            if (lease == null) {
-                break;
+            try (final SimpleConsumerLease lease = pooledLeases.poll()) {
+                if (lease == null) {
+                    break;
+                }
+                logger.debug("drainLeases: draining lease {}", new Object[]{lease.toString()});
+                final ProcessSession session = sessionFactory.createSession();
+                lease.setProcessSession(session, context);
+                lease.readEvents();
             }
-            final ProcessSession session = sessionFactory.createSession();
-            lease.setProcessSession(session, context);
-            lease.readEvents();
         }
         logger.debug("drainLeases: END");
     }
@@ -314,7 +324,8 @@ public class ConsumerPool implements AutoCloseable {
         // Attempt to get lease (reader) from queue.
         SimpleConsumerLease lease = pooledLeases.poll();
         if (lease == null) {
-            final EventStreamReader<byte[]> reader = createPravegaReader();
+            final String readerId = generateReaderId();
+            final EventStreamReader<byte[]> reader = createPravegaReader(readerId);
             consumerCreatedCountRef.incrementAndGet();
             /**
              * For now return a new consumer lease. But we could later elect to
@@ -325,7 +336,7 @@ public class ConsumerPool implements AutoCloseable {
              * around doing frequent network calls and at worst having consumers
              * sitting idle which could prompt excessive rebalances.
              */
-            lease = new SimpleConsumerLease(reader);
+            lease = new SimpleConsumerLease(reader, readerId);
         }
         // Bind the reader in the lease to this session.
         lease.setProcessSession(session, processContext);
@@ -334,19 +345,22 @@ public class ConsumerPool implements AutoCloseable {
         return lease;
     }
 
+    protected String generateReaderId() {
+        return UUID.randomUUID().toString().replace("-", "");
+    }
+
     /**
      * Exposed as protected method for easier unit testing
      *
      * @return reader
      */
-    protected EventStreamReader<byte[]> createPravegaReader() {
-        final String readerId = UUID.randomUUID().toString().replace("-", "");
+    protected EventStreamReader<byte[]> createPravegaReader(final String readerId) {
+        logger.debug("createPravegaReader: readerId={}", new Object[]{readerId});
         final EventStreamReader<byte[]> reader = clientFactory.createReader(
                 readerId,
                 readerGroupName,
                 new ByteArraySerializer(),
                 ReaderConfig.builder().build());
-        logger.debug("createPravegaReader: readerId={}", new Object[]{readerId});
         return reader;
     }
 
@@ -360,7 +374,8 @@ public class ConsumerPool implements AutoCloseable {
         leases.stream().forEach((lease) -> {
             lease.close(true);
         });
-        scheduler.shutdown();
+        performCheckpointExecutor.shutdown();
+        initiateCheckpointExecutor.shutdown();
         readerGroup.close();
         readerGroupManager.close();
         clientFactory.close();
@@ -386,8 +401,8 @@ public class ConsumerPool implements AutoCloseable {
         private volatile ProcessContext processContext;
         private volatile boolean closedConsumer;
 
-        private SimpleConsumerLease(final EventStreamReader<byte[]> reader) {
-            super(reader, readerFactory, writerFactory, logger);
+        private SimpleConsumerLease(final EventStreamReader<byte[]> reader, final String readerId) {
+            super(reader, readerId, readerFactory, writerFactory, logger);
             this.reader = reader;
         }
 

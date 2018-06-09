@@ -29,6 +29,7 @@ import org.apache.nifi.serialization.RecordSetWriterFactory;
 import java.io.Closeable;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 import static org.apache.nifi.processors.pravega.ConsumePravega.REL_SUCCESS;
 import static org.apache.nifi.processors.pravega.ConsumerPool.CHECKPOINT_NAME_FINAL_PREFIX;
@@ -43,6 +44,7 @@ import static org.apache.nifi.processors.pravega.ConsumerPool.CHECKPOINT_NAME_FI
 public abstract class ConsumerLease implements Closeable {
 
     private final EventStreamReader<byte[]> pravegaReader;
+    private final String readerId;
     private final ComponentLog logger;
     private final RecordSetWriterFactory writerFactory;
     private final RecordReaderFactory readerFactory;
@@ -50,16 +52,20 @@ public abstract class ConsumerLease implements Closeable {
 
     ConsumerLease(
             final EventStreamReader<byte[]> pravegaReader,
+            final String readerId,
             final RecordReaderFactory readerFactory,
             final RecordSetWriterFactory writerFactory,
             final ComponentLog logger) {
         this.pravegaReader = pravegaReader;
+        this.readerId = readerId;
         this.readerFactory = readerFactory;
         this.writerFactory = writerFactory;
         this.logger = logger;
     }
 
-    private boolean gotQuitSignal = false;
+    public String toString() {
+        return String.format("ConsumerLease[readerId=%s]", readerId);
+    }
 
     /**
      * Reads events from the Pravega reader and creates FlowFiles.
@@ -68,33 +74,41 @@ public abstract class ConsumerLease implements Closeable {
      *
      */
     boolean readEvents() {
-        if (gotQuitSignal) {
-            return false;
-        }
+        logger.debug("readEvents: {}", new Object[]{this.toString()});
+        long eventCount = 0;
+        boolean gotCheckpoint = false;
+        final long startTime = System.nanoTime();
         try {
             while (true) {
                 final long READER_TIMEOUT_MS = 10000;
                 final EventRead<byte[]> eventRead = pravegaReader.readNextEvent(READER_TIMEOUT_MS);
+                logger.debug("readEvents: eventRead={}", new Object[]{eventRead});
                 if (eventRead.isCheckpoint()) {
-                    getProcessSession().commit();
-                    boolean isFinalCheckpoint = eventRead.getCheckpointName().startsWith(CHECKPOINT_NAME_FINAL_PREFIX);
-                    if (isFinalCheckpoint) {
-                        logger.info("readEvents: got final checkpoint");
-                        // TODO: is gotQuitSignal required?
-                        gotQuitSignal = true;
-                        // Call readNextEvent to indicate to Pravega that we are done with the checkpoint.
-                        // The result will be discarded;
-                        // TODO: Does readNextEvent followed by close of reader advance the read position?
-                        pravegaReader.readNextEvent(0);
-                        // Ensure that this reader does not get reused.
-                        this.poison();
-                        return false;
+                    // If a checkpoint was in the queue, it will be the first event returned.
+                    // If this case, we want to continue to read until the 2nd checkpoint.
+                    if (eventCount > 0 || gotCheckpoint) {
+                        getProcessSession().commit();
+                        final long transmissionMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTime);
+                        logger.info("Received and committed {} events in {} milliseconds from readerId {}.",
+                                new Object[]{eventCount, transmissionMillis, readerId});
+                        boolean isFinalCheckpoint = eventRead.getCheckpointName().startsWith(CHECKPOINT_NAME_FINAL_PREFIX);
+                        if (isFinalCheckpoint) {
+                            logger.debug("readEvents: got final checkpoint");
+                            // Call readNextEvent to indicate to Pravega that we are done with the checkpoint.
+                            // The result will be discarded;
+                            pravegaReader.readNextEvent(0);
+                            // Ensure that this lease (reader) does not get reused.
+                            this.poison();
+                            return false;
+                        }
+                        return true;
                     }
-                    return true;
+                    gotCheckpoint = true;
                 } else if (eventRead.getEvent() == null) {
-                    logger.warn("timeout waiting for checkpoint");
+                    logger.warn("timeout waiting for checkpoint; session will be rolled back");
                     return true;
                 } else {
+                    eventCount++;
                     processEvent(eventRead);
                 }
             }
