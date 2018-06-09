@@ -116,7 +116,7 @@ public class ConsumePravega extends AbstractPravegaProcessor {
         logger.info("close: END");
     }
 
-    private synchronized ConsumerPool getConsumerPool(final ProcessContext context, final ProcessSessionFactory sessionFactory) {
+    private synchronized ConsumerPool getConsumerPool(final ProcessContext context, final ProcessSessionFactory sessionFactory) throws Exception {
         ConsumerPool pool = consumerPool;
         if (pool != null) {
             return pool;
@@ -125,67 +125,65 @@ public class ConsumePravega extends AbstractPravegaProcessor {
         return consumerPool = createConsumerPool(context, sessionFactory, getLogger());
     }
 
-    protected ConsumerPool createConsumerPool(final ProcessContext context, final ProcessSessionFactory sessionFactory, final ComponentLog log) {
+    protected ConsumerPool createConsumerPool(final ProcessContext context, final ProcessSessionFactory sessionFactory, final ComponentLog log) throws Exception {
         final int maxLeases = context.getMaxConcurrentTasks();
+        logger.debug("createConsumerPool: maxLeases={}", new Object[]{maxLeases});
         final long maxUncommittedTime = context.getProperty(MAX_UNCOMMITTED_TIME).asTimePeriod(TimeUnit.MILLISECONDS);
-        URI controllerURI;
-        try {
-            controllerURI = new URI(context.getProperty(PROP_CONTROLLER).getValue());
-        } catch (URISyntaxException e) {
-            throw new RuntimeException(e);
-        }
+        final URI controllerURI = new URI(context.getProperty(PROP_CONTROLLER).getValue());
         final String scope = context.getProperty(PROP_SCOPE).getValue();
         final String streamName = context.getProperty(PROP_STREAM).getValue();
         final StreamConfiguration streamConfig = StreamConfiguration.builder()
                 .scalingPolicy(ScalingPolicy.fixed(1))
                 .build();
-
         List<String> streamNames = new ArrayList<>();
         streamNames.add(streamName);
-
-        try {
-            return new ConsumerPool(
-                    log,
-                    context.getStateManager(),
-                    sessionFactory,
-                    this::isPrimaryNode,
-                    maxLeases,
-                    maxUncommittedTime,
-                    controllerURI,
-                    scope,
-                    streamNames,
-                    streamConfig,
-                    null,
-                    null);
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+        return new ConsumerPool(
+                log,
+                context.getStateManager(),
+                sessionFactory,
+                this::isPrimaryNode,
+                maxLeases,
+                maxUncommittedTime,
+                controllerURI,
+                scope,
+                streamNames,
+                streamConfig,
+                null,
+                null);
     }
 
     @Override
     public void onTrigger(final ProcessContext context, final ProcessSessionFactory sessionFactory, final ProcessSession session) throws ProcessException {
         logger.debug("onTrigger: BEGIN");
-        final ConsumerPool pool = getConsumerPool(context, sessionFactory);
-        if (pool == null) {
-            context.yield();
-        } else {
-            try (final ConsumerLease lease = pool.obtainConsumer(session, context)) {
-                if (lease == null) {
-                    context.yield();
-                } else {
-                    try {
-                        if (this.isScheduled()) {
-                            if (!lease.readEvents()) {
-                                context.yield();
-                            }
-                        }
-                    } catch (final Throwable t) {
-                        logger.error("Exception while processing data from Pravega so will close the lease {} due to {}",
-                                new Object[]{lease, t}, t);
+        try {
+            final ConsumerPool pool = getConsumerPool(context, sessionFactory);
+            if (pool == null) {
+                context.yield();
+            } else {
+                try (final ConsumerLease lease = pool.obtainConsumer(session, context)) {
+                    if (lease == null) {
                         context.yield();
+                    } else {
+                        try {
+                            if (this.isScheduled()) {
+                                if (!lease.readEvents()) {
+                                    context.yield();
+                                }
+                            }
+                        } catch (final Throwable t) {
+                            logger.error("Exception while processing data from Pravega so will close the lease {} due to {}",
+                                    new Object[]{lease, t}, t);
+                            context.yield();
+                        }
                     }
                 }
             }
+        } catch (final ProcessorNotReadyException e) {
+            // This is an expected exception that occurs during startup of a non-primary node.
+            logger.info("onTrigger: ProcessorNotReadyException: {}", new Object[]{e});
+            context.yield();
+        } catch (final Exception e) {
+            throw new RuntimeException(e);
         }
         logger.debug("onTrigger: END");
     }

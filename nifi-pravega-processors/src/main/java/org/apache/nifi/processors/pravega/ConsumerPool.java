@@ -122,7 +122,7 @@ public class ConsumerPool implements AutoCloseable {
         final boolean haveCheckpoint = checkpointStr != null;
 
         if (!haveReaderGroup && !primaryNode) {
-            throw new RuntimeException("Non-primary node can't start until the reader group has been created.");
+            throw new ProcessorNotReadyException("Non-primary node can't start until the reader group has been created.");
         }
 
         pooledLeases = new ArrayBlockingQueue<>(maxConcurrentLeases);
@@ -228,7 +228,7 @@ public class ConsumerPool implements AutoCloseable {
                     logger.debug("performCheckpoint: Calling initiateCheckpoint; checkpointName={}", new Object[]{checkpointName});
                     CompletableFuture<Checkpoint> checkpointFuture = readerGroup.initiateCheckpoint(checkpointName, initiateCheckpointExecutor);
                     logger.debug("performCheckpoint: Got future.");
-                    Checkpoint checkpoint = checkpointFuture.get();
+                    Checkpoint checkpoint = checkpointFuture.get(10000, TimeUnit.MILLISECONDS);
                     logger.debug("performCheckpoint: Checkpoint completed; checkpoint={}, positions={}", new Object[]{checkpoint, checkpoint.asImpl().getPositions()});
                     if (isFinal || isPrimaryNode.get()) {
                         // Get serialized checkpoint byte array and convert to base64 string.
@@ -245,7 +245,7 @@ public class ConsumerPool implements AutoCloseable {
                     }
                 }
             } catch (final Exception e) {
-                logger.warn("performCheckpoint: {}", new Object[]{e.getMessage()});
+                logger.warn("performCheckpoint: {}", new Object[]{e});
                 // Ignore error. We will retry when we are scheduled again.
             }
         }

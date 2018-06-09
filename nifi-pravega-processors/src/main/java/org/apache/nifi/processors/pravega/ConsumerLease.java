@@ -67,8 +67,11 @@ public abstract class ConsumerLease implements Closeable {
         return String.format("ConsumerLease[readerId=%s]", readerId);
     }
 
+    private EventRead<byte[]> nextEventToRead = null;
+
     /**
      * Reads events from the Pravega reader and creates FlowFiles.
+     * This method will be called periodically by onTrigger.
      *
      * @return false if calling onTrigger should yield; otherwise true
      *
@@ -76,36 +79,47 @@ public abstract class ConsumerLease implements Closeable {
     boolean readEvents() {
         logger.debug("readEvents: {}", new Object[]{this.toString()});
         long eventCount = 0;
-        boolean gotCheckpoint = false;
-        final long startTime = System.nanoTime();
+        final long startTime = System.currentTimeMillis();
+        final long stopTime = startTime + 100;
         try {
             while (true) {
                 final long READER_TIMEOUT_MS = 10000;
-                final EventRead<byte[]> eventRead = pravegaReader.readNextEvent(READER_TIMEOUT_MS);
+                EventRead<byte[]> eventRead = nextEventToRead;
+                nextEventToRead = null;
+                if (nextEventToRead == null) {
+                    eventRead = pravegaReader.readNextEvent(READER_TIMEOUT_MS);
+                }
                 logger.debug("readEvents: eventRead={}", new Object[]{eventRead});
                 if (eventRead.isCheckpoint()) {
                     // If a checkpoint was in the queue, it will be the first event returned.
                     // If this case, we want to continue to read until the 2nd checkpoint.
-                    if (eventCount > 0 || gotCheckpoint) {
+                    if (eventCount > 0) {
                         getProcessSession().commit();
-                        final long transmissionMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTime);
+                        final long transmissionMillis = System.currentTimeMillis() - startTime;
                         logger.info("Received and committed {} events in {} milliseconds from readerId {}.",
                                 new Object[]{eventCount, transmissionMillis, readerId});
-                        boolean isFinalCheckpoint = eventRead.getCheckpointName().startsWith(CHECKPOINT_NAME_FINAL_PREFIX);
-                        if (isFinalCheckpoint) {
-                            logger.debug("readEvents: got final checkpoint");
-                            // Call readNextEvent to indicate to Pravega that we are done with the checkpoint.
-                            // The result will be discarded;
-                            pravegaReader.readNextEvent(0);
-                            // Ensure that this lease (reader) does not get reused.
-                            this.poison();
-                            return false;
-                        }
+                    }
+                    // TODO: call readNextEvent to indicate that we are done with the checkpoint; need to save result and use it later.
+                    // Call readNextEvent to indicate to Pravega that we are done with the checkpoint.
+                    // The result will be stored and used at the next iteration;
+                    nextEventToRead = pravegaReader.readNextEvent(0);
+                    boolean isFinalCheckpoint = eventRead.getCheckpointName().startsWith(CHECKPOINT_NAME_FINAL_PREFIX);
+                    if (isFinalCheckpoint) {
+                        logger.debug("readEvents: got final checkpoint");
+                        // Ensure that this lease (reader) does not get reused.
+                        this.poison();
+                        return false;
+                    }
+                    if (System.currentTimeMillis() > stopTime) {
                         return true;
                     }
-                    gotCheckpoint = true;
+                    eventCount = 0;
                 } else if (eventRead.getEvent() == null) {
-                    logger.warn("timeout waiting for checkpoint; session will be rolled back");
+                    if (eventCount > 0) {
+                        logger.warn("timeout waiting for checkpoint; session with {} events will be rolled back", new Object[]{eventCount});
+                    } else {
+                        logger.info("timeout waiting for checkpoint; session will be rolled back");
+                    }
                     return true;
                 } else {
                     eventCount++;
