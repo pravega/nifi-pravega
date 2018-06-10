@@ -7,6 +7,7 @@ import org.apache.nifi.annotation.behavior.Stateful;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.SeeAlso;
 import org.apache.nifi.annotation.documentation.Tags;
+import org.apache.nifi.annotation.lifecycle.OnShutdown;
 import org.apache.nifi.annotation.lifecycle.OnStopped;
 import org.apache.nifi.annotation.lifecycle.OnUnscheduled;
 import org.apache.nifi.components.PropertyDescriptor;
@@ -27,7 +28,6 @@ import java.util.concurrent.TimeUnit;
 @Tags({"Pravega", "Nautilus", "Get", "Ingest", "Ingress", "Receive", "Consume", "Subscribe", "Stream"})
 @CapabilityDescription("Consumes events from Pravega.")
 @InputRequirement(InputRequirement.Requirement.INPUT_FORBIDDEN)
-//@SupportsBatching
 @Stateful(scopes = Scope.CLUSTER, description = "TODO After performing a fetching from HBase, stores a timestamp of the last-modified cell that was found. In addition, it stores the ID of the row(s) "
         + "and the value of each cell that has that timestamp as its modification date. This is stored across the cluster and allows the next fetch to avoid duplicating data, even if this Processor is "
         + "run on Primary Node only and the Primary Node changes.")
@@ -96,15 +96,19 @@ public class ConsumePravega extends AbstractPravegaProcessor {
 
     @OnUnscheduled
     public void onUnscheduled(final ProcessContext context) {
+        System.out.println("ConsumePravega.onUnscheduled: BEGIN");
         ConsumerPool pool = consumerPool;
         if (pool != null) {
             pool.gracefulShutdown(context);
+//            close(context);
         }
+        System.out.println("ConsumePravega.onUnscheduled: END");
     }
 
     @OnStopped
     public void close(final ProcessContext context) {
-        logger.info("close: BEGIN");
+        logger.info("ConsumePravega.close: BEGIN");
+        System.out.println("ConsumePravega.close: BEGIN");
         ConsumerPool pool;
         synchronized (this) {
             pool = consumerPool;
@@ -113,8 +117,16 @@ public class ConsumePravega extends AbstractPravegaProcessor {
         if (pool != null) {
             pool.close();
         }
-        logger.info("close: END");
+        logger.info("ConsumePravega.close: END");
+        System.out.println("ConsumePravega.close: END");
     }
+
+//    @OnShutdown
+//    public void onShutdown() {
+//        isPrimaryNode();
+//        logger.info("onShutdown");
+//        System.out.println("onShutdown");
+//    }
 
     private synchronized ConsumerPool getConsumerPool(final ProcessContext context, final ProcessSessionFactory sessionFactory) throws Exception {
         ConsumerPool pool = consumerPool;
@@ -155,20 +167,25 @@ public class ConsumePravega extends AbstractPravegaProcessor {
     @Override
     public void onTrigger(final ProcessContext context, final ProcessSessionFactory sessionFactory, final ProcessSession session) throws ProcessException {
         logger.debug("onTrigger: BEGIN");
+        System.out.println("onTrigger: BEGIN");
         try {
             final ConsumerPool pool = getConsumerPool(context, sessionFactory);
+            System.out.println("onTrigger: Return from getConsumerPool");
             if (pool == null) {
                 context.yield();
             } else {
                 try (final ConsumerLease lease = pool.obtainConsumer(session, context)) {
+                    System.out.println("onTrigger: Return from obtainConsumer");
                     if (lease == null) {
                         context.yield();
                     } else {
                         try {
                             if (this.isScheduled()) {
+                                System.out.println("onTrigger: Calling readEvents");
                                 if (!lease.readEvents()) {
                                     context.yield();
                                 }
+                                System.out.println("onTrigger: Return from readEvents");
                             }
                         } catch (final Throwable t) {
                             logger.error("Exception while processing data from Pravega so will close the lease {} due to {}",
@@ -183,9 +200,11 @@ public class ConsumePravega extends AbstractPravegaProcessor {
             logger.info("onTrigger: ProcessorNotReadyException: {}", new Object[]{e});
             context.yield();
         } catch (final Exception e) {
+            System.out.println("onTrigger: Exception: " + e.toString());
             throw new RuntimeException(e);
         }
         logger.debug("onTrigger: END");
+        System.out.println("onTrigger: END");
     }
 
 }

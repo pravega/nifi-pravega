@@ -223,29 +223,28 @@ public class ConsumerPool implements AutoCloseable {
         logger.debug("performCheckpoint: BEGIN");
         synchronized (checkpointMutex) {
             try {
-                if (isFinal || isPrimaryNode.get()) {
+                if (isPrimaryNode.get()) {
+                    logger.debug("performCheckpoint: onlineReaders={}", new Object[]{readerGroup.getOnlineReaders()});
                     final String checkpointName = (isFinal ? CHECKPOINT_NAME_FINAL_PREFIX : "") + UUID.randomUUID().toString();
                     logger.debug("performCheckpoint: Calling initiateCheckpoint; checkpointName={}", new Object[]{checkpointName});
                     CompletableFuture<Checkpoint> checkpointFuture = readerGroup.initiateCheckpoint(checkpointName, initiateCheckpointExecutor);
                     logger.debug("performCheckpoint: Got future.");
                     Checkpoint checkpoint = checkpointFuture.get(10000, TimeUnit.MILLISECONDS);
                     logger.debug("performCheckpoint: Checkpoint completed; checkpoint={}, positions={}", new Object[]{checkpoint, checkpoint.asImpl().getPositions()});
-                    if (isFinal || isPrimaryNode.get()) {
-                        // Get serialized checkpoint byte array and convert to base64 string.
-                        String checkpointStr = new String(Base64.getEncoder().encode(checkpoint.toBytes().array()));
-                        Map<String, String> mapState = new HashMap<>();
-                        // The final checkpoint does not have a reader group.
-                        if (!isFinal) {
-                            mapState.put(STATE_KEY_READER_GROUP, readerGroupName);
-                        }
-                        mapState.put(STATE_KEY_CHECKPOINT_BASE64, checkpointStr);
-                        mapState.put(STATE_KEY_CHECKPOINT_NAME, checkpoint.getName());
-                        mapState.put(STATE_KEY_CHECKPOINT_TIME, ZonedDateTime.now(ZoneOffset.UTC).format(DateTimeFormatter.ISO_INSTANT));
-                        stateManager.setState(mapState, Scope.CLUSTER);
+                    // Get serialized checkpoint byte array and convert to base64 string.
+                    String checkpointStr = new String(Base64.getEncoder().encode(checkpoint.toBytes().array()));
+                    Map<String, String> mapState = new HashMap<>();
+                    // The final checkpoint does not have a reader group.
+                    if (!isFinal) {
+                        mapState.put(STATE_KEY_READER_GROUP, readerGroupName);
                     }
+                    mapState.put(STATE_KEY_CHECKPOINT_BASE64, checkpointStr);
+                    mapState.put(STATE_KEY_CHECKPOINT_NAME, checkpoint.getName());
+                    mapState.put(STATE_KEY_CHECKPOINT_TIME, ZonedDateTime.now(ZoneOffset.UTC).format(DateTimeFormatter.ISO_INSTANT));
+                    stateManager.setState(mapState, Scope.CLUSTER);
                 }
             } catch (final Exception e) {
-                logger.warn("performCheckpoint: {}", new Object[]{e});
+                logger.warn("performCheckpoint: timed out waiting for checkpoint to complete", e);
                 // Ignore error. We will retry when we are scheduled again.
             }
         }
@@ -261,29 +260,37 @@ public class ConsumerPool implements AutoCloseable {
      * If any checkpoint is in progress, then it is possible for some threads to already have committed their session.
      * Therefore, if any checkpoint is in progress, we want to wait for it and ensure that another one does not start.
      *
+     * Note that this is called by onUnscheduled which is called when the user stops the processor.
+     * However, it is also called when a NiFi node is stopped in a cluster, in which case we actually
+     * want the other nodes to continue running. So we want this method to perform everything needed
+     * for a graceful shutdown but to allow other nodes to continue using the reader group.
+     * Therefore, the reader group is not deleted by this processor.
+     * Instead it should be cleaned up periodically by Pravega.
+     * TODO: Does Pravega clean up idle reader groups?
+     *
      */
     public void gracefulShutdown(final ProcessContext context) {
-        logger.info("gracefulShutdown: BEGIN");
-        if (isPrimaryNode.get()) {
-            // onTrigger may not be executed anymore so we need to process events until the final checkpoint is reached.
-            ExecutorService drainExecutor = startDrainLeases(context);
+        logger.debug("gracefulShutdown: BEGIN");
+        System.out.println("gracefulShutdown: BEGIN");
+        // Shutdown checkpoint scheduler so that it doesn't start a new checkpoint.
+        performCheckpointExecutor.shutdown();
+        // onTrigger may not be executed anymore so we need to process events until the final checkpoint is reached.
+        ExecutorService drainExecutor = startDrainLeases(context);
+        try {
             try {
-                // Shutdown checkpoint scheduler so that it doesn't start a new checkpoint.
-                performCheckpointExecutor.shutdown();
-                try {
-                    logger.debug("gracefulShutdown: waiting for checkpoint scheduler executor to terminate");
-                    performCheckpointExecutor.awaitTermination(60000, TimeUnit.MILLISECONDS);
-                } catch (InterruptedException e) {
-                    logger.error("gracefulShutdown", e);
-                }
-                performCheckpoint(true, context);
-            } finally {
-                drainExecutor.shutdown();
+                logger.debug("gracefulShutdown: waiting for checkpoint scheduler executor to terminate");
+                performCheckpointExecutor.awaitTermination(60000, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+                logger.error("gracefulShutdown", e);
             }
-            // Delete reader group.
-            readerGroupManager.deleteReaderGroup(readerGroupName);
+            performCheckpoint(true, context);
+        } finally {
+            drainExecutor.shutdown();
         }
-        logger.info("gracefulShutdown: END");
+        clientFactory.close();
+        logger.info("Graceful shutdown completed successfully.");
+        logger.debug("gracefulShutdown: END");
+        System.out.println("gracefulShutdown: END");
     }
 
     // In case no onTrigger threads are running, we go through each lease and run it until the final checkpoint is received.
@@ -296,18 +303,22 @@ public class ConsumerPool implements AutoCloseable {
 
     private void drainLeases(final ProcessContext context) {
         logger.debug("drainLeases: BEGIN");
+        System.out.println("drainLeases: BEGIN");
         for (;;) {
             try (final SimpleConsumerLease lease = pooledLeases.poll()) {
                 if (lease == null) {
                     break;
                 }
                 logger.debug("drainLeases: draining lease {}", new Object[]{lease.toString()});
+                System.out.println("drainLeases: draining lease " + lease);
                 final ProcessSession session = sessionFactory.createSession();
                 lease.setProcessSession(session, context);
                 lease.readEvents();
+                lease.close(true);
             }
         }
         logger.debug("drainLeases: END");
+        System.out.println("drainLeases: END");
     }
 
     /**
@@ -356,6 +367,7 @@ public class ConsumerPool implements AutoCloseable {
      */
     protected EventStreamReader<byte[]> createPravegaReader(final String readerId) {
         logger.debug("createPravegaReader: readerId={}", new Object[]{readerId});
+        System.out.println("createPravegaReader: readerId=" + readerId);
         final EventStreamReader<byte[]> reader = clientFactory.createReader(
                 readerId,
                 readerGroupName,
@@ -369,16 +381,24 @@ public class ConsumerPool implements AutoCloseable {
      */
     @Override
     public void close() {
+        System.out.println("ConsumerPool.close: BEGIN");
         final List<SimpleConsumerLease> leases = new ArrayList<>();
         pooledLeases.drainTo(leases);
         leases.stream().forEach((lease) -> {
             lease.close(true);
         });
-        performCheckpointExecutor.shutdown();
-        initiateCheckpointExecutor.shutdown();
+        performCheckpointExecutor.shutdownNow();
+        initiateCheckpointExecutor.shutdownNow();
+        try {
+            performCheckpointExecutor.awaitTermination(10000, TimeUnit.MILLISECONDS);
+            initiateCheckpointExecutor.awaitTermination(10000, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            System.out.println(e);
+        }
         readerGroup.close();
         readerGroupManager.close();
         clientFactory.close();
+        System.out.println("ConsumerPool.close: END");
     }
 
     private void closeReader(final EventStreamReader<byte[]> reader) {
@@ -396,19 +416,22 @@ public class ConsumerPool implements AutoCloseable {
 
     private class SimpleConsumerLease extends ConsumerLease {
 
-        private final EventStreamReader<byte[]> reader;
         private volatile ProcessSession session;
         private volatile ProcessContext processContext;
         private volatile boolean closedConsumer;
 
         private SimpleConsumerLease(final EventStreamReader<byte[]> reader, final String readerId) {
             super(reader, readerId, readerFactory, writerFactory, logger);
-            this.reader = reader;
         }
 
         void setProcessSession(final ProcessSession session, final ProcessContext context) {
             this.session = session;
             this.processContext = context;
+        }
+
+        @Override
+        public ProcessSession getProcessSession() {
+            return session;
         }
 
         @Override
@@ -419,17 +442,13 @@ public class ConsumerPool implements AutoCloseable {
         }
 
         @Override
-        public ProcessSession getProcessSession() {
-            return session;
-        }
-
-        @Override
         public void close() {
             super.close();
             close(false);
         }
 
         public void close(final boolean forceClose) {
+            System.out.println("SimpleConsumerLease.close: BEGIN");
             if (closedConsumer) {
                 return;
             }
@@ -441,7 +460,10 @@ public class ConsumerPool implements AutoCloseable {
             if (forceClose || isPoisoned() || !pooledLeases.offer(this)) {
                 closedConsumer = true;
                 closeReader(reader);
+                logger.debug("SimpleConsumerLease.close: Reader {} closed", new Object[]{readerId});
+                System.out.println("SimpleConsumerLease.close:Reader " + readerId + " closed");
             }
+            System.out.println("SimpleConsumerLease.close: END");
         }
     }
 

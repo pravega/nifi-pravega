@@ -64,14 +64,17 @@ public abstract class AbstractPravegaProcessor extends AbstractSessionFactoryPro
 
     @Override
     public void onTrigger(final ProcessContext context, final ProcessSessionFactory sessionFactory) throws ProcessException {
+        System.out.println("AbstractPravegaProcessor: onTrigger: BEGIN");
         final ProcessSession session = sessionFactory.createSession();
         try {
             onTrigger(context, sessionFactory, session);
             session.commit();
         } catch (final Throwable t) {
             session.rollback(true);
+            System.out.println("AbstractPravegaProcessor: onTrigger: Exception: " + t.toString());
             throw t;
         }
+        System.out.println("AbstractPravegaProcessor: onTrigger: END");
     }
 
     public abstract void onTrigger(final ProcessContext context, final ProcessSessionFactory sessionFactory, final ProcessSession session) throws ProcessException;

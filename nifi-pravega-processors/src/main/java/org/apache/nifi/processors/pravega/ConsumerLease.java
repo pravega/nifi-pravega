@@ -29,7 +29,6 @@ import org.apache.nifi.serialization.RecordSetWriterFactory;
 import java.io.Closeable;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.TimeUnit;
 
 import static org.apache.nifi.processors.pravega.ConsumePravega.REL_SUCCESS;
 import static org.apache.nifi.processors.pravega.ConsumerPool.CHECKPOINT_NAME_FINAL_PREFIX;
@@ -43,20 +42,20 @@ import static org.apache.nifi.processors.pravega.ConsumerPool.CHECKPOINT_NAME_FI
  */
 public abstract class ConsumerLease implements Closeable {
 
-    private final EventStreamReader<byte[]> pravegaReader;
-    private final String readerId;
+    protected final EventStreamReader<byte[]> reader;
+    protected final String readerId;
     private final ComponentLog logger;
     private final RecordSetWriterFactory writerFactory;
     private final RecordReaderFactory readerFactory;
     private boolean poisoned = false;
 
     ConsumerLease(
-            final EventStreamReader<byte[]> pravegaReader,
+            final EventStreamReader<byte[]> reader,
             final String readerId,
             final RecordReaderFactory readerFactory,
             final RecordSetWriterFactory writerFactory,
             final ComponentLog logger) {
-        this.pravegaReader = pravegaReader;
+        this.reader = reader;
         this.readerId = readerId;
         this.readerFactory = readerFactory;
         this.writerFactory = writerFactory;
@@ -73,11 +72,17 @@ public abstract class ConsumerLease implements Closeable {
      * Reads events from the Pravega reader and creates FlowFiles.
      * This method will be called periodically by onTrigger.
      *
+     * Note that it is possible to receive a false final checkpoint.
+     * See ConsumerPool.gracefulShutdown().
+     * Therefore, we should allow for normal events and checkpoints to occur even after
+     * a final checkpoint.
+     *
      * @return false if calling onTrigger should yield; otherwise true
      *
      */
     boolean readEvents() {
         logger.debug("readEvents: {}", new Object[]{this.toString()});
+        System.out.println("readEvents: " + this);
         long eventCount = 0;
         final long startTime = System.currentTimeMillis();
         final long stopTime = startTime + 100;
@@ -87,9 +92,11 @@ public abstract class ConsumerLease implements Closeable {
                 EventRead<byte[]> eventRead = nextEventToRead;
                 nextEventToRead = null;
                 if (nextEventToRead == null) {
-                    eventRead = pravegaReader.readNextEvent(READER_TIMEOUT_MS);
+                    System.out.println("readEvents: " + this + ": Calling readNextEvent");
+                    eventRead = reader.readNextEvent(READER_TIMEOUT_MS);
                 }
                 logger.debug("readEvents: eventRead={}", new Object[]{eventRead});
+                System.out.println("readEvents: " + this + ": eventRead=" + eventRead.toString());
                 if (eventRead.isCheckpoint()) {
                     // If a checkpoint was in the queue, it will be the first event returned.
                     // If this case, we want to continue to read until the 2nd checkpoint.
@@ -99,14 +106,15 @@ public abstract class ConsumerLease implements Closeable {
                         logger.info("Received and committed {} events in {} milliseconds from readerId {}.",
                                 new Object[]{eventCount, transmissionMillis, readerId});
                     }
-                    // TODO: call readNextEvent to indicate that we are done with the checkpoint; need to save result and use it later.
                     // Call readNextEvent to indicate to Pravega that we are done with the checkpoint.
                     // The result will be stored and used at the next iteration;
-                    nextEventToRead = pravegaReader.readNextEvent(0);
+                    nextEventToRead = reader.readNextEvent(0);
                     boolean isFinalCheckpoint = eventRead.getCheckpointName().startsWith(CHECKPOINT_NAME_FINAL_PREFIX);
                     if (isFinalCheckpoint) {
                         logger.debug("readEvents: got final checkpoint");
-                        // Ensure that this lease (reader) does not get reused.
+                        // Poison this lease (reader) and return immediately because we don't want to continue reading from this reader.
+                        // If this was a false final checkpoint, then a new lease (reader) will be obtained during the next
+                        // onTrigger.
                         this.poison();
                         return false;
                     }
