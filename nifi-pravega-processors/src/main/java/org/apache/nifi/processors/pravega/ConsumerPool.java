@@ -221,10 +221,13 @@ public class ConsumerPool implements AutoCloseable {
      */
     private void performCheckpoint(final boolean isFinal, final ProcessContext context) {
         logger.debug("performCheckpoint: BEGIN");
+        System.out.println("performCheckpoint: BEGIN");
         synchronized (checkpointMutex) {
             try {
                 if (isPrimaryNode.get()) {
-                    logger.debug("performCheckpoint: onlineReaders={}", new Object[]{readerGroup.getOnlineReaders()});
+                    System.out.println("performCheckpoint: this is the primary node");
+                    final Set<String> onlineReaders = readerGroup.getOnlineReaders();
+                    logger.debug("performCheckpoint: onlineReaders ({})={}", new Object[]{onlineReaders.size(), onlineReaders});
                     final String checkpointName = (isFinal ? CHECKPOINT_NAME_FINAL_PREFIX : "") + UUID.randomUUID().toString();
                     logger.debug("performCheckpoint: Calling initiateCheckpoint; checkpointName={}", new Object[]{checkpointName});
                     CompletableFuture<Checkpoint> checkpointFuture = readerGroup.initiateCheckpoint(checkpointName, initiateCheckpointExecutor);
@@ -249,6 +252,7 @@ public class ConsumerPool implements AutoCloseable {
             }
         }
         logger.debug("performCheckpoint: END");
+        System.out.println("performCheckpoint: END");
     }
 
     final static String CHECKPOINT_NAME_FINAL_PREFIX = "FINAL-";
@@ -259,6 +263,8 @@ public class ConsumerPool implements AutoCloseable {
      * represent exactly what each onTrigger thread on each node committed to each session.
      * If any checkpoint is in progress, then it is possible for some threads to already have committed their session.
      * Therefore, if any checkpoint is in progress, we want to wait for it and ensure that another one does not start.
+     *
+     * When the primary cluster node is shut down, it is no longer the primary node when this method is called.
      *
      * Note that this is called by onUnscheduled which is called when the user stops the processor.
      * However, it is also called when a NiFi node is stopped in a cluster, in which case we actually
@@ -284,10 +290,21 @@ public class ConsumerPool implements AutoCloseable {
                 logger.error("gracefulShutdown", e);
             }
             performCheckpoint(true, context);
+            // If this is the primary node, then we are sure that the final checkpoint completed and onTrigger returned.
+            // Otherwise, onTrigger could still be running now.
+            // TODO: How to wait for onTrigger to complete?
+            try {
+                Thread.sleep(5000);
+            } catch (InterruptedException e) {
+                logger.error("gracefulShutdown: sleeping", e);
+            }
         } finally {
-            drainExecutor.shutdown();
+            drainExecutor.shutdownNow();
         }
-        clientFactory.close();
+        // TODO: I should not need to close these now.
+//        readerGroup.close();
+//        readerGroupManager.close();
+//        clientFactory.close();
         logger.info("Graceful shutdown completed successfully.");
         logger.debug("gracefulShutdown: END");
         System.out.println("gracefulShutdown: END");
@@ -461,7 +478,7 @@ public class ConsumerPool implements AutoCloseable {
                 closedConsumer = true;
                 closeReader(reader);
                 logger.debug("SimpleConsumerLease.close: Reader {} closed", new Object[]{readerId});
-                System.out.println("SimpleConsumerLease.close:Reader " + readerId + " closed");
+                System.out.println("SimpleConsumerLease.close: Reader " + readerId + " closed");
             }
             System.out.println("SimpleConsumerLease.close: END");
         }

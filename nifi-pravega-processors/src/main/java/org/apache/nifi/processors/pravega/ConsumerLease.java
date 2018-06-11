@@ -29,6 +29,7 @@ import org.apache.nifi.serialization.RecordSetWriterFactory;
 import java.io.Closeable;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.*;
 
 import static org.apache.nifi.processors.pravega.ConsumePravega.REL_SUCCESS;
 import static org.apache.nifi.processors.pravega.ConsumerPool.CHECKPOINT_NAME_FINAL_PREFIX;
@@ -81,8 +82,8 @@ public abstract class ConsumerLease implements Closeable {
      *
      */
     boolean readEvents() {
-        logger.debug("readEvents: {}", new Object[]{this.toString()});
-        System.out.println("readEvents: " + this);
+        logger.debug("readEvents: BEGIN: {}", new Object[]{this.toString()});
+        System.out.println("readEvents: BEGIN: " + this);
         long eventCount = 0;
         final long startTime = System.currentTimeMillis();
         final long stopTime = startTime + 100;
@@ -91,9 +92,15 @@ public abstract class ConsumerLease implements Closeable {
                 final long READER_TIMEOUT_MS = 10000;
                 EventRead<byte[]> eventRead = nextEventToRead;
                 nextEventToRead = null;
-                if (nextEventToRead == null) {
-                    System.out.println("readEvents: " + this + ": Calling readNextEvent");
-                    eventRead = reader.readNextEvent(READER_TIMEOUT_MS);
+                if (eventRead == null) {
+//                    eventRead = reader.readNextEvent(READER_TIMEOUT_MS);
+                    ExecutorService executor = Executors.newCachedThreadPool();
+                    try {
+                        System.out.println("readEvents: " + this + ": Calling readNextEvent");
+                        eventRead = executor.submit(() -> reader.readNextEvent(READER_TIMEOUT_MS)).get(READER_TIMEOUT_MS + 1000, TimeUnit.MILLISECONDS);
+                    } finally {
+                        executor.shutdown();
+                    }
                 }
                 logger.debug("readEvents: eventRead={}", new Object[]{eventRead});
                 System.out.println("readEvents: " + this + ": eventRead=" + eventRead.toString());
@@ -116,9 +123,11 @@ public abstract class ConsumerLease implements Closeable {
                         // If this was a false final checkpoint, then a new lease (reader) will be obtained during the next
                         // onTrigger.
                         this.poison();
+                        System.out.println("readEvents: END: " + this + ": Returning due to final checkpoint");
                         return false;
                     }
                     if (System.currentTimeMillis() > stopTime) {
+                        System.out.println("readEvents: END: " + this + ": Returning due to non-final checkpointt");
                         return true;
                     }
                     eventCount = 0;
@@ -128,6 +137,7 @@ public abstract class ConsumerLease implements Closeable {
                     } else {
                         logger.info("timeout waiting for checkpoint; session will be rolled back");
                     }
+                    System.out.println("readEvents: END: " + this + ": Returning due timeout");
                     return true;
                 } else {
                     eventCount++;
@@ -135,15 +145,20 @@ public abstract class ConsumerLease implements Closeable {
                 }
             }
         }
-        catch (final ReinitializationRequiredException e) {
-            // This reader must be closed so that a new one can be created.
+        catch (final ReinitializationRequiredException | InterruptedException | ExecutionException e) {
+            System.out.println("readEvents: END: " + this + ": Exception: " + e.toString());
             this.poison();
             throw new ProcessException(e);
-        } catch (final ProcessException pe) {
-            throw pe;
-        } catch (final Throwable t) {
+        } catch (final ProcessException e) {
+            System.out.println("readEvents: END: " + this + ": Exception: " + e.toString());
+            throw e;
+        } catch (final TimeoutException e) {
+            System.out.println("readEvents: END: " + this + ": Timeout Exception: " + e.toString());
+            return true;
+        } catch (final Throwable e) {
+            System.out.println("readEvents: END: " + this + ": Exception: " + e.toString());
             this.poison();
-            throw t;
+            throw e;
         }
     }
 
