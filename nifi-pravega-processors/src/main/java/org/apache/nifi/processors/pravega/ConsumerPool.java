@@ -48,7 +48,8 @@ import java.util.function.Supplier;
  */
 public class ConsumerPool implements AutoCloseable {
 
-    private final BlockingQueue<SimpleConsumerLease> pooledLeases;
+    private final BlockingQueue<SimpleConsumerLease> pooledLeases;      // must have lock on activeLeases to access
+    private final Set<SimpleConsumerLease> activeLeases = new HashSet<>();
     private final URI controllerURI;
     private final String scope;
     private final List<String> streamNames;
@@ -281,62 +282,99 @@ public class ConsumerPool implements AutoCloseable {
         // Shutdown checkpoint scheduler so that it doesn't start a new checkpoint.
         performCheckpointExecutor.shutdown();
         // onTrigger may not be executed anymore so we need to process events until the final checkpoint is reached.
-        ExecutorService drainExecutor = startDrainLeases(context);
+        ExecutorService gracefulShutdownExecutor = Executors.newCachedThreadPool();
         try {
-            try {
+            gracefulShutdownExecutor.submit(() -> {
                 logger.debug("gracefulShutdown: waiting for checkpoint scheduler executor to terminate");
-                performCheckpointExecutor.awaitTermination(60000, TimeUnit.MILLISECONDS);
-            } catch (InterruptedException e) {
-                logger.error("gracefulShutdown", e);
-            }
-            performCheckpoint(true, context);
+                try {
+                    performCheckpointExecutor.awaitTermination(60000, TimeUnit.MILLISECONDS);
+                } catch (InterruptedException e) {
+                    logger.error("gracefulShutdown", e);
+                }
+                performCheckpoint(true, context);
+                logger.info("Graceful shutdown completed successfully.");
+            });
             // If this is the primary node, then we are sure that the final checkpoint completed and onTrigger returned.
             // Otherwise, onTrigger could still be running now.
-            // TODO: How to wait for onTrigger to complete?
-            try {
-                Thread.sleep(5000);
-            } catch (InterruptedException e) {
-                logger.error("gracefulShutdown: sleeping", e);
+            // Wait for all active leases to become inactive and for any pooled leases to have last completed
+            // a final checkpoint.
+            // For each lease in pooledLeases, if the last checkpoint was a final checkpoint, then remove it from the pool.
+            // Otherwise, start a thread to drain the lease until a final checkpoint is reached or an exception occurs.
+            // Continue this until activeLeases and pooledLeases are both empty.
+            for (; ; ) {
+                synchronized (activeLeases) {
+                    // If we have any leases in pooledLeases, they will not be drained by onTrigger so we
+                    // submit a task to drain each one.
+                    final List<SimpleConsumerLease> leases = new ArrayList<>();
+                    pooledLeases.drainTo(leases);
+                    leases.forEach((lease) -> {
+                        gracefulShutdownExecutor.submit(() -> {
+                            System.out.println("gracefulShutdown: draining lease " + lease);
+                            final ProcessSession session = sessionFactory.createSession();
+                            lease.setProcessSession(session, context);
+                            try {
+                                lease.readEventsUntilFinalCheckpoint();
+                            } catch (Exception e) {
+                                System.out.println("gracefulShutdown: Exception:" + e);
+                                logger.error("gracefulShutdown: Exception", e);
+                            }
+                            lease.close(true);
+                            System.out.println("gracefulShutdown: drained lease " + lease);
+                        });
+                    });
+                    // If we still have an active lease, an onTrigger thread is still running.
+                    // We need to wait for it to complete and put the lease back into the pool.
+                    if (activeLeases.isEmpty()) {
+                        break;
+                    }
+                    System.out.println("gracefulShutdown: activeLeases count=" + activeLeases.size());
+                }
+                Thread.sleep(100);
             }
+            // Wait for checkpoint and all drain tasks to complete.
+            gracefulShutdownExecutor.shutdown();
+            gracefulShutdownExecutor.awaitTermination(60000, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
         } finally {
-            drainExecutor.shutdownNow();
+            gracefulShutdownExecutor.shutdownNow();
         }
         // TODO: I should not need to close these now.
 //        readerGroup.close();
 //        readerGroupManager.close();
 //        clientFactory.close();
-        logger.info("Graceful shutdown completed successfully.");
+        // TODO: Delete reader group if this is the primary node?
         logger.debug("gracefulShutdown: END");
         System.out.println("gracefulShutdown: END");
     }
 
     // In case no onTrigger threads are running, we go through each lease and run it until the final checkpoint is received.
-    private ExecutorService startDrainLeases(final ProcessContext context) {
-        ScheduledExecutorService drainExecutor = Executors.newScheduledThreadPool(1);
-        // TODO: do more than one?
-        drainExecutor.scheduleWithFixedDelay(() -> drainLeases(context), 0, 1000, TimeUnit.MILLISECONDS);
-        return drainExecutor;
-    }
+//    private ExecutorService startDrainLeases(final ProcessContext context) {
+//        ScheduledExecutorService drainExecutor = Executors.newScheduledThreadPool(1);
+//        // TODO: do more than one?
+//        drainExecutor.scheduleWithFixedDelay(() -> drainLeases(context), 0, 1000, TimeUnit.MILLISECONDS);
+//        return drainExecutor;
+//    }
 
-    private void drainLeases(final ProcessContext context) {
-        logger.debug("drainLeases: BEGIN");
-        System.out.println("drainLeases: BEGIN");
-        for (;;) {
-            try (final SimpleConsumerLease lease = pooledLeases.poll()) {
-                if (lease == null) {
-                    break;
-                }
-                logger.debug("drainLeases: draining lease {}", new Object[]{lease.toString()});
-                System.out.println("drainLeases: draining lease " + lease);
-                final ProcessSession session = sessionFactory.createSession();
-                lease.setProcessSession(session, context);
-                lease.readEvents();
-                lease.close(true);
-            }
-        }
-        logger.debug("drainLeases: END");
-        System.out.println("drainLeases: END");
-    }
+//    private void drainLeases(final ProcessContext context) {
+//        logger.debug("drainLeases: BEGIN");
+//        System.out.println("drainLeases: BEGIN");
+//        for (;;) {
+//            try (final SimpleConsumerLease lease = pooledLeases.poll()) {
+//                if (lease == null) {
+//                    break;
+//                }
+//                logger.debug("drainLeases: draining lease {}", new Object[]{lease.toString()});
+//                System.out.println("drainLeases: draining lease " + lease);
+//                final ProcessSession session = sessionFactory.createSession();
+//                lease.setProcessSession(session, context);
+//                lease.readEvents();
+//                lease.close(true);
+//            }
+//        }
+//        logger.debug("drainLeases: END");
+//        System.out.println("drainLeases: END");
+//    }
 
     /**
      * Obtains a consumer from the pool if one is available or lazily
@@ -350,27 +388,31 @@ public class ConsumerPool implements AutoCloseable {
      */
     public ConsumerLease obtainConsumer(final ProcessSession session, final ProcessContext processContext) {
         // Attempt to get lease (reader) from queue.
-        SimpleConsumerLease lease = pooledLeases.poll();
-        if (lease == null) {
-            final String readerId = generateReaderId();
-            final EventStreamReader<byte[]> reader = createPravegaReader(readerId);
-            consumerCreatedCountRef.incrementAndGet();
-            /**
-             * For now return a new consumer lease. But we could later elect to
-             * have this return null if we determine the broker indicates that
-             * the lag time on all streams being monitored is sufficiently low.
-             * For now we should encourage conservative use of threads because
-             * having too many means we'll have at best useless threads sitting
-             * around doing frequent network calls and at worst having consumers
-             * sitting idle which could prompt excessive rebalances.
-             */
-            lease = new SimpleConsumerLease(reader, readerId);
-        }
-        // Bind the reader in the lease to this session.
-        lease.setProcessSession(session, processContext);
+        synchronized (activeLeases) {
+            SimpleConsumerLease lease = pooledLeases.poll();
+            if (lease == null) {
+                final String readerId = generateReaderId();
+                final EventStreamReader<byte[]> reader = createPravegaReader(readerId);
+                consumerCreatedCountRef.incrementAndGet();
+                /**
+                 * For now return a new consumer lease. But we could later elect to
+                 * have this return null if we determine the broker indicates that
+                 * the lag time on all streams being monitored is sufficiently low.
+                 * For now we should encourage conservative use of threads because
+                 * having too many means we'll have at best useless threads sitting
+                 * around doing frequent network calls and at worst having consumers
+                 * sitting idle which could prompt excessive rebalances.
+                 */
+                lease = new SimpleConsumerLease(reader, readerId);
+            }
 
-        leasesObtainedCountRef.incrementAndGet();
-        return lease;
+            // Bind the reader in the lease to this session.
+            lease.setProcessSession(session, processContext);
+
+            activeLeases.add(lease);
+            leasesObtainedCountRef.incrementAndGet();
+            return lease;
+        }
     }
 
     protected String generateReaderId() {
@@ -400,7 +442,10 @@ public class ConsumerPool implements AutoCloseable {
     public void close() {
         System.out.println("ConsumerPool.close: BEGIN");
         final List<SimpleConsumerLease> leases = new ArrayList<>();
-        pooledLeases.drainTo(leases);
+        synchronized (activeLeases) {
+            pooledLeases.drainTo(leases);
+            // TODO: also drain activeLeases
+        }
         leases.stream().forEach((lease) -> {
             lease.close(true);
         });
@@ -474,7 +519,14 @@ public class ConsumerPool implements AutoCloseable {
                 session.rollback();
                 setProcessSession(null, null);
             }
-            if (forceClose || isPoisoned() || !pooledLeases.offer(this)) {
+            boolean addedToPool = false;
+            synchronized (activeLeases) {
+                activeLeases.remove(this);
+                if (!(forceClose || isPoisoned())) {
+                    addedToPool = pooledLeases.offer(this);
+                }
+            }
+            if (!addedToPool) {
                 closedConsumer = true;
                 closeReader(reader);
                 logger.debug("SimpleConsumerLease.close: Reader {} closed", new Object[]{readerId});

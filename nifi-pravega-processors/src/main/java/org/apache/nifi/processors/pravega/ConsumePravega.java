@@ -97,10 +97,12 @@ public class ConsumePravega extends AbstractPravegaProcessor {
     @OnUnscheduled
     public void onUnscheduled(final ProcessContext context) {
         System.out.println("ConsumePravega.onUnscheduled: BEGIN");
+        // AbstractSessionFactoryProcessor.updateScheduledFalse is annotated with @OnUnscheduled but we are unsure
+        // if it was already called. Therefore, we ensure that it is called here.
+        updateScheduledFalse();
         ConsumerPool pool = consumerPool;
         if (pool != null) {
             pool.gracefulShutdown(context);
-//            close(context);
         }
         System.out.println("ConsumePravega.onUnscheduled: END");
     }

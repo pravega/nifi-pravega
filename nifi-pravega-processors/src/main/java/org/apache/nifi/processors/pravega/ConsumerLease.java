@@ -78,6 +78,9 @@ public abstract class ConsumerLease implements Closeable {
      * Therefore, we should allow for normal events and checkpoints to occur even after
      * a final checkpoint.
      *
+     * If this method has read and processed data up to a checkpoint, it will return successfully.
+     * Otherwise, it will throw an exception.
+     *
      * @return false if calling onTrigger should yield; otherwise true
      *
      */
@@ -86,24 +89,32 @@ public abstract class ConsumerLease implements Closeable {
         System.out.println("readEvents: BEGIN: " + this);
         long eventCount = 0;
         final long startTime = System.currentTimeMillis();
-        final long stopTime = startTime + 100;
+        final long minStopTime = startTime + 100;
+        final long timeoutTime = startTime + 10000;
         try {
             while (true) {
-                final long READER_TIMEOUT_MS = 10000;
                 EventRead<byte[]> eventRead = nextEventToRead;
                 nextEventToRead = null;
                 if (eventRead == null) {
-//                    eventRead = reader.readNextEvent(READER_TIMEOUT_MS);
-                    ExecutorService executor = Executors.newCachedThreadPool();
-                    try {
-                        System.out.println("readEvents: " + this + ": Calling readNextEvent");
-                        eventRead = executor.submit(() -> reader.readNextEvent(READER_TIMEOUT_MS)).get(READER_TIMEOUT_MS + 1000, TimeUnit.MILLISECONDS);
-                    } finally {
-                        executor.shutdown();
+                    final long readTimeoutTime = Math.max(0, timeoutTime - System.currentTimeMillis());
+                    logger.debug("readEvents: {}:  Calling readNextEvent with readTimeoutTime={}", new Object[]{this, readTimeoutTime});
+                    System.out.println("readEvents: " + this + ": Calling readNextEvent with readTimeoutTime=" + readTimeoutTime);
+                    if (true) {
+                        eventRead = reader.readNextEvent(readTimeoutTime);
+                    } else {
+                        ExecutorService executor = Executors.newCachedThreadPool();
+                        try {
+                            eventRead = executor.submit(() -> reader.readNextEvent(readTimeoutTime)).get(readTimeoutTime + 1000, TimeUnit.MILLISECONDS);
+                        } finally {
+                            executor.shutdown();
+                        }
                     }
+                    logger.debug("readEvents: eventRead={}", new Object[]{eventRead});
+                    System.out.println("readEvents: " + this + ": eventRead=" + eventRead.toString());
+                } else {
+                    logger.debug("readEvents: (saved) eventRead={}", new Object[]{eventRead});
+                    System.out.println("readEvents: " + this + ": (saved) eventRead=" + eventRead.toString());
                 }
-                logger.debug("readEvents: eventRead={}", new Object[]{eventRead});
-                System.out.println("readEvents: " + this + ": eventRead=" + eventRead.toString());
                 if (eventRead.isCheckpoint()) {
                     // If a checkpoint was in the queue, it will be the first event returned.
                     // If this case, we want to continue to read until the 2nd checkpoint.
@@ -114,51 +125,66 @@ public abstract class ConsumerLease implements Closeable {
                                 new Object[]{eventCount, transmissionMillis, readerId});
                     }
                     // Call readNextEvent to indicate to Pravega that we are done with the checkpoint.
-                    // The result will be stored and used at the next iteration;
+                    // A non-timeout result will be stored and used at the next iteration;
                     nextEventToRead = reader.readNextEvent(0);
+                    if (nextEventToRead.getEvent() == null && !nextEventToRead.isCheckpoint()) {
+                        nextEventToRead = null;
+                    }
                     boolean isFinalCheckpoint = eventRead.getCheckpointName().startsWith(CHECKPOINT_NAME_FINAL_PREFIX);
+                    lastCheckpointIsFinal = isFinalCheckpoint;
                     if (isFinalCheckpoint) {
                         logger.debug("readEvents: got final checkpoint");
-                        // Poison this lease (reader) and return immediately because we don't want to continue reading from this reader.
-                        // If this was a false final checkpoint, then a new lease (reader) will be obtained during the next
-                        // onTrigger.
-                        this.poison();
                         System.out.println("readEvents: END: " + this + ": Returning due to final checkpoint");
                         return false;
                     }
-                    if (System.currentTimeMillis() > stopTime) {
-                        System.out.println("readEvents: END: " + this + ": Returning due to non-final checkpointt");
+                    if (System.currentTimeMillis() > minStopTime) {
+                        System.out.println("readEvents: END: " + this + ": Returning due to non-final checkpoint");
                         return true;
                     }
                     eventCount = 0;
                 } else if (eventRead.getEvent() == null) {
-                    if (eventCount > 0) {
-                        logger.warn("timeout waiting for checkpoint; session with {} events will be rolled back", new Object[]{eventCount});
-                    } else {
-                        logger.info("timeout waiting for checkpoint; session will be rolled back");
-                    }
-                    System.out.println("readEvents: END: " + this + ": Returning due timeout");
-                    return true;
+                    // Sometimes readNextEvent returns no event even when a timeout has not occurred.
+                    // If this occurs, we continue reading.
+//                    if (System.currentTimeMillis() > timeoutTime) {
+                        if (eventCount > 0) {
+                            logger.warn("timeout waiting for event or checkpoint; session with {} events will be rolled back", new Object[]{eventCount});
+                            throw new TimeoutException("timeout waiting for event or checkpoint");
+                        } else {
+                            logger.info("timeout waiting for event checkpoint; session has no events");
+                            return false;
+                        }
+//                    }
                 } else {
                     eventCount++;
                     processEvent(eventRead);
                 }
             }
         }
-        catch (final ReinitializationRequiredException | InterruptedException | ExecutionException e) {
+        // We should throw a ProcessException if onTrigger should be called again immediately.
+        // Otherwise, the processor will be administratively yielded for 10 seconds.
+        catch (final ProcessException e) {
+            System.out.println("readEvents: END: " + this + ": Exception: " + e.toString());
+            throw e;
+        } catch (final ReinitializationRequiredException e) {
             System.out.println("readEvents: END: " + this + ": Exception: " + e.toString());
             this.poison();
             throw new ProcessException(e);
-        } catch (final ProcessException e) {
+        } catch (final TimeoutException | InterruptedException | ExecutionException e) {
             System.out.println("readEvents: END: " + this + ": Exception: " + e.toString());
-            throw e;
-        } catch (final TimeoutException e) {
-            System.out.println("readEvents: END: " + this + ": Timeout Exception: " + e.toString());
-            return true;
+            this.poison();
+            throw new RuntimeException(e);
         } catch (final Throwable e) {
             System.out.println("readEvents: END: " + this + ": Exception: " + e.toString());
             this.poison();
             throw e;
+        }
+    }
+
+    private boolean lastCheckpointIsFinal = false;
+
+    void readEventsUntilFinalCheckpoint() {
+        while (!lastCheckpointIsFinal) {
+            readEvents();
         }
     }
 
