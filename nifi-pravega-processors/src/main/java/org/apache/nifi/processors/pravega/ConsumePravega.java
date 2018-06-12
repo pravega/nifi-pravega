@@ -7,7 +7,6 @@ import org.apache.nifi.annotation.behavior.Stateful;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.SeeAlso;
 import org.apache.nifi.annotation.documentation.Tags;
-import org.apache.nifi.annotation.lifecycle.OnShutdown;
 import org.apache.nifi.annotation.lifecycle.OnStopped;
 import org.apache.nifi.annotation.lifecycle.OnUnscheduled;
 import org.apache.nifi.components.PropertyDescriptor;
@@ -18,7 +17,6 @@ import org.apache.nifi.processor.exception.ProcessException;
 import org.apache.nifi.processor.util.StandardValidators;
 
 import java.net.URI;
-import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -28,9 +26,9 @@ import java.util.concurrent.TimeUnit;
 @Tags({"Pravega", "Nautilus", "Get", "Ingest", "Ingress", "Receive", "Consume", "Subscribe", "Stream"})
 @CapabilityDescription("Consumes events from Pravega.")
 @InputRequirement(InputRequirement.Requirement.INPUT_FORBIDDEN)
-@Stateful(scopes = Scope.CLUSTER, description = "TODO After performing a fetching from HBase, stores a timestamp of the last-modified cell that was found. In addition, it stores the ID of the row(s) "
-        + "and the value of each cell that has that timestamp as its modification date. This is stored across the cluster and allows the next fetch to avoid duplicating data, even if this Processor is "
-        + "run on Primary Node only and the Primary Node changes.")
+@Stateful(scopes = Scope.CLUSTER, description =
+        "This processor stores the most recent successful checkpoint in the cluster state to allow it to resume when restarting the processor "
+        + "or node. It also stores the Pravega reader group name to allow other readers to join it.")
 @SeeAlso({PublishPravega.class})
 public class ConsumePravega extends AbstractPravegaProcessor {
 
@@ -123,13 +121,6 @@ public class ConsumePravega extends AbstractPravegaProcessor {
         System.out.println("ConsumePravega.close: END");
     }
 
-//    @OnShutdown
-//    public void onShutdown() {
-//        isPrimaryNode();
-//        logger.info("onShutdown");
-//        System.out.println("onShutdown");
-//    }
-
     private synchronized ConsumerPool getConsumerPool(final ProcessContext context, final ProcessSessionFactory sessionFactory) throws Exception {
         ConsumerPool pool = consumerPool;
         if (pool != null) {
@@ -199,9 +190,10 @@ public class ConsumePravega extends AbstractPravegaProcessor {
             }
         } catch (final ProcessorNotReadyException e) {
             // This is an expected exception that occurs during startup of a non-primary node.
-            logger.info("onTrigger: ProcessorNotReadyException: {}", new Object[]{e});
+            logger.info("onTrigger: ProcessorNotReadyException", new Object[]{e});
             context.yield();
         } catch (final Exception e) {
+            logger.info("onTrigger: Exception", new Object[]{e});
             System.out.println("onTrigger: Exception: " + e.toString());
             throw new RuntimeException(e);
         }

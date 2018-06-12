@@ -27,6 +27,7 @@ import org.apache.nifi.serialization.RecordReaderFactory;
 import org.apache.nifi.serialization.RecordSetWriterFactory;
 
 import java.io.Closeable;
+import java.net.URI;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.*;
@@ -43,19 +44,23 @@ import static org.apache.nifi.processors.pravega.ConsumerPool.CHECKPOINT_NAME_FI
  */
 public abstract class ConsumerLease implements Closeable {
 
+    private final URI controllerURI;
     protected final EventStreamReader<byte[]> reader;
     protected final String readerId;
     private final ComponentLog logger;
     private final RecordSetWriterFactory writerFactory;
     private final RecordReaderFactory readerFactory;
     private boolean poisoned = false;
+    private boolean lastCheckpointIsFinal = false;
 
     ConsumerLease(
+            final URI controllerURI,
             final EventStreamReader<byte[]> reader,
             final String readerId,
             final RecordReaderFactory readerFactory,
             final RecordSetWriterFactory writerFactory,
             final ComponentLog logger) {
+        this.controllerURI = controllerURI;
         this.reader = reader;
         this.readerId = readerId;
         this.readerFactory = readerFactory;
@@ -99,16 +104,7 @@ public abstract class ConsumerLease implements Closeable {
                     final long readTimeoutTime = Math.max(0, timeoutTime - System.currentTimeMillis());
                     logger.debug("readEvents: {}:  Calling readNextEvent with readTimeoutTime={}", new Object[]{this, readTimeoutTime});
                     System.out.println("readEvents: " + this + ": Calling readNextEvent with readTimeoutTime=" + readTimeoutTime);
-                    if (true) {
-                        eventRead = reader.readNextEvent(readTimeoutTime);
-                    } else {
-                        ExecutorService executor = Executors.newCachedThreadPool();
-                        try {
-                            eventRead = executor.submit(() -> reader.readNextEvent(readTimeoutTime)).get(readTimeoutTime + 1000, TimeUnit.MILLISECONDS);
-                        } finally {
-                            executor.shutdown();
-                        }
-                    }
+                    eventRead = reader.readNextEvent(readTimeoutTime);
                     logger.debug("readEvents: eventRead={}", new Object[]{eventRead});
                     System.out.println("readEvents: " + this + ": eventRead=" + eventRead.toString());
                 } else {
@@ -143,17 +139,13 @@ public abstract class ConsumerLease implements Closeable {
                     }
                     eventCount = 0;
                 } else if (eventRead.getEvent() == null) {
-                    // Sometimes readNextEvent returns no event even when a timeout has not occurred.
-                    // If this occurs, we continue reading.
-//                    if (System.currentTimeMillis() > timeoutTime) {
-                        if (eventCount > 0) {
-                            logger.warn("timeout waiting for event or checkpoint; session with {} events will be rolled back", new Object[]{eventCount});
-                            throw new TimeoutException("timeout waiting for event or checkpoint");
-                        } else {
-                            logger.info("timeout waiting for event checkpoint; session has no events");
-                            return false;
-                        }
-//                    }
+                    if (eventCount > 0) {
+                        logger.warn("timeout waiting for event or checkpoint; session with {} events will be rolled back", new Object[]{eventCount});
+                        throw new TimeoutException("timeout waiting for event or checkpoint");
+                    } else {
+                        logger.info("timeout waiting for event checkpoint; session has no events");
+                        return false;
+                    }
                 } else {
                     eventCount++;
                     processEvent(eventRead);
@@ -169,7 +161,7 @@ public abstract class ConsumerLease implements Closeable {
             System.out.println("readEvents: END: " + this + ": Exception: " + e.toString());
             this.poison();
             throw new ProcessException(e);
-        } catch (final TimeoutException | InterruptedException | ExecutionException e) {
+        } catch (final TimeoutException e) {
             System.out.println("readEvents: END: " + this + ": Exception: " + e.toString());
             this.poison();
             throw new RuntimeException(e);
@@ -179,8 +171,6 @@ public abstract class ConsumerLease implements Closeable {
             throw e;
         }
     }
-
-    private boolean lastCheckpointIsFinal = false;
 
     void readEventsUntilFinalCheckpoint() {
         while (!lastCheckpointIsFinal) {
@@ -228,8 +218,7 @@ public abstract class ConsumerLease implements Closeable {
             });
         }
         flowFile = session.putAllAttributes(flowFile, getAttributes(eventRead));
-        // TODO: set transitUri
-        final String transitUri = "TODO transitUri";
+        final String transitUri = String.format("%s/%s", controllerURI, eventRead.getEventPointer());
         session.getProvenanceReporter().receive(flowFile, transitUri);
         session.transfer(flowFile, REL_SUCCESS);
     }

@@ -42,9 +42,9 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
 /**
- * A pool of Pravega Readers for a given stream. Consumers can be obtained by
- * calling 'obtainConsumer'.
+ * A pool of Pravega Readers for a given stream.
  * This maps to a Pravega Reader Group.
+ * Multiple instances of a component in a NiFi cluster will share a single reader group.
  */
 public class ConsumerPool implements AutoCloseable {
 
@@ -71,11 +71,14 @@ public class ConsumerPool implements AutoCloseable {
     private final StateManager stateManager;
     private final ProcessSessionFactory sessionFactory;
     private final Supplier<Boolean> isPrimaryNode;
+    private final Object checkpointMutex = new Object();
 
     static private final String STATE_KEY_READER_GROUP = "reader.group.name";
     static private final String STATE_KEY_CHECKPOINT_NAME = "reader.group.checkpoint.name";
     static private final String STATE_KEY_CHECKPOINT_BASE64 = "reader.group.checkpoint.base64";
     static private final String STATE_KEY_CHECKPOINT_TIME = "reader.group.checkpoint.time";
+
+    static final String CHECKPOINT_NAME_FINAL_PREFIX = "FINAL-";
 
     /**
      * Creates a pool of Pravega reader objects that will grow up to the maximum
@@ -207,8 +210,6 @@ public class ConsumerPool implements AutoCloseable {
         performCheckpointExecutor.scheduleWithFixedDelay(this::performRegularCheckpoint, 1000, 1000, TimeUnit.MILLISECONDS);
     }
 
-    private final Object checkpointMutex = new Object();
-
     private void performRegularCheckpoint() {
         performCheckpoint(false, null);
     }
@@ -216,8 +217,7 @@ public class ConsumerPool implements AutoCloseable {
     /**
      * Perform a checkpoint, wait for it to complete, and write the checkpoint to the state.
      *
-     * @param isFinal If true, the processor is shutting down and this is the primary node.
-     *                This will be the final checkpoint.
+     * @param isFinal If true, a final checkpoint will be performed.
      * @param context Required if isFinal is true.
      */
     private void performCheckpoint(final boolean isFinal, final ProcessContext context) {
@@ -226,6 +226,7 @@ public class ConsumerPool implements AutoCloseable {
         synchronized (checkpointMutex) {
             try {
                 if (isPrimaryNode.get()) {
+                    logger.debug("performCheckpoint: this is the primary node");
                     System.out.println("performCheckpoint: this is the primary node");
                     final Set<String> onlineReaders = readerGroup.getOnlineReaders();
                     logger.debug("performCheckpoint: onlineReaders ({})={}", new Object[]{onlineReaders.size(), onlineReaders});
@@ -256,12 +257,10 @@ public class ConsumerPool implements AutoCloseable {
         System.out.println("performCheckpoint: END");
     }
 
-    final static String CHECKPOINT_NAME_FINAL_PREFIX = "FINAL-";
-
     /**
      * We want to gracefully stop this processor.
      * This means that the last checkpoint written to the state must
-     * represent exactly what each onTrigger thread on each node committed to each session.
+     * represent exactly what each thread on each node committed to each session.
      * If any checkpoint is in progress, then it is possible for some threads to already have committed their session.
      * Therefore, if any checkpoint is in progress, we want to wait for it and ensure that another one does not start.
      *
@@ -273,7 +272,6 @@ public class ConsumerPool implements AutoCloseable {
      * for a graceful shutdown but to allow other nodes to continue using the reader group.
      * Therefore, the reader group is not deleted by this processor.
      * Instead it should be cleaned up periodically by Pravega.
-     * TODO: Does Pravega clean up idle reader groups?
      *
      */
     public void gracefulShutdown(final ProcessContext context) {
@@ -281,26 +279,24 @@ public class ConsumerPool implements AutoCloseable {
         System.out.println("gracefulShutdown: BEGIN");
         // Shutdown checkpoint scheduler so that it doesn't start a new checkpoint.
         performCheckpointExecutor.shutdown();
-        // onTrigger may not be executed anymore so we need to process events until the final checkpoint is reached.
+        // Create an executor that will run the shutdown tasks concurrently.
         ExecutorService gracefulShutdownExecutor = Executors.newCachedThreadPool();
         try {
+            // Start a concurrent task to perform the final checkpoint.
             gracefulShutdownExecutor.submit(() -> {
                 logger.debug("gracefulShutdown: waiting for checkpoint scheduler executor to terminate");
                 try {
+                    // If a checkpoint is already in progress, wait for it.
                     performCheckpointExecutor.awaitTermination(60000, TimeUnit.MILLISECONDS);
                 } catch (InterruptedException e) {
                     logger.error("gracefulShutdown", e);
                 }
+                // Perform the final checkpoint.
                 performCheckpoint(true, context);
                 logger.info("Graceful shutdown completed successfully.");
             });
-            // If this is the primary node, then we are sure that the final checkpoint completed and onTrigger returned.
-            // Otherwise, onTrigger could still be running now.
-            // Wait for all active leases to become inactive and for any pooled leases to have last completed
-            // a final checkpoint.
-            // For each lease in pooledLeases, if the last checkpoint was a final checkpoint, then remove it from the pool.
-            // Otherwise, start a thread to drain the lease until a final checkpoint is reached or an exception occurs.
-            // Continue this until activeLeases and pooledLeases are both empty.
+
+            // Drain all leases until each one has reached a final checkpoint.
             for (; ; ) {
                 synchronized (activeLeases) {
                     // If we have any leases in pooledLeases, they will not be drained by onTrigger so we
@@ -331,7 +327,8 @@ public class ConsumerPool implements AutoCloseable {
                 }
                 Thread.sleep(100);
             }
-            // Wait for checkpoint and all drain tasks to complete.
+
+            // Wait for above tasks to complete (possibly with an exception).
             gracefulShutdownExecutor.shutdown();
             gracefulShutdownExecutor.awaitTermination(60000, TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
@@ -339,42 +336,9 @@ public class ConsumerPool implements AutoCloseable {
         } finally {
             gracefulShutdownExecutor.shutdownNow();
         }
-        // TODO: I should not need to close these now.
-//        readerGroup.close();
-//        readerGroupManager.close();
-//        clientFactory.close();
-        // TODO: Delete reader group if this is the primary node?
         logger.debug("gracefulShutdown: END");
         System.out.println("gracefulShutdown: END");
     }
-
-    // In case no onTrigger threads are running, we go through each lease and run it until the final checkpoint is received.
-//    private ExecutorService startDrainLeases(final ProcessContext context) {
-//        ScheduledExecutorService drainExecutor = Executors.newScheduledThreadPool(1);
-//        // TODO: do more than one?
-//        drainExecutor.scheduleWithFixedDelay(() -> drainLeases(context), 0, 1000, TimeUnit.MILLISECONDS);
-//        return drainExecutor;
-//    }
-
-//    private void drainLeases(final ProcessContext context) {
-//        logger.debug("drainLeases: BEGIN");
-//        System.out.println("drainLeases: BEGIN");
-//        for (;;) {
-//            try (final SimpleConsumerLease lease = pooledLeases.poll()) {
-//                if (lease == null) {
-//                    break;
-//                }
-//                logger.debug("drainLeases: draining lease {}", new Object[]{lease.toString()});
-//                System.out.println("drainLeases: draining lease " + lease);
-//                final ProcessSession session = sessionFactory.createSession();
-//                lease.setProcessSession(session, context);
-//                lease.readEvents();
-//                lease.close(true);
-//            }
-//        }
-//        logger.debug("drainLeases: END");
-//        System.out.println("drainLeases: END");
-//    }
 
     /**
      * Obtains a consumer from the pool if one is available or lazily
@@ -441,10 +405,10 @@ public class ConsumerPool implements AutoCloseable {
     @Override
     public void close() {
         System.out.println("ConsumerPool.close: BEGIN");
+        // Leases should have been closed in gracefulShutdown. In case they were not, try again.
         final List<SimpleConsumerLease> leases = new ArrayList<>();
         synchronized (activeLeases) {
             pooledLeases.drainTo(leases);
-            // TODO: also drain activeLeases
         }
         leases.stream().forEach((lease) -> {
             lease.close(true);
@@ -455,6 +419,7 @@ public class ConsumerPool implements AutoCloseable {
             performCheckpointExecutor.awaitTermination(10000, TimeUnit.MILLISECONDS);
             initiateCheckpointExecutor.awaitTermination(10000, TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
+            logger.error("ConsumerPool.close: Exception", e);
             System.out.println(e);
         }
         readerGroup.close();
@@ -483,7 +448,7 @@ public class ConsumerPool implements AutoCloseable {
         private volatile boolean closedConsumer;
 
         private SimpleConsumerLease(final EventStreamReader<byte[]> reader, final String readerId) {
-            super(reader, readerId, readerFactory, writerFactory, logger);
+            super(controllerURI, reader, readerId, readerFactory, writerFactory, logger);
         }
 
         void setProcessSession(final ProcessSession session, final ProcessContext context) {

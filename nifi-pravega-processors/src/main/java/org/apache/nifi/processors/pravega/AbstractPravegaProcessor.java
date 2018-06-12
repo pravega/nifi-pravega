@@ -80,6 +80,7 @@ public abstract class AbstractPravegaProcessor extends AbstractSessionFactoryPro
     public abstract void onTrigger(final ProcessContext context, final ProcessSessionFactory sessionFactory, final ProcessSession session) throws ProcessException;
 
     public boolean isPrimaryNode() {
+        // TODO: This is not working as expected when the last node of a cluster is stopped. It should return true but actually returns false.
         final NodeTypeProvider provider = getNodeTypeProvider();
         final boolean isClustered = provider.isClustered();
         final boolean isPrimary = provider.isPrimary();
