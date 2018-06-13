@@ -5,6 +5,7 @@ import io.pravega.client.ClientFactory;
 import io.pravega.client.admin.StreamManager;
 import io.pravega.client.stream.EventStreamWriter;
 import io.pravega.client.stream.EventWriterConfig;
+import io.pravega.client.stream.Stream;
 import io.pravega.client.stream.StreamConfiguration;
 import io.pravega.client.stream.impl.ByteArraySerializer;
 import org.apache.nifi.annotation.lifecycle.OnStopped;
@@ -62,18 +63,17 @@ public abstract class AbstractPravegaPublisher extends AbstractPravegaProcessor 
             logger.debug("getWriter: this={}", new Object[]{System.identityHashCode(this)});
             if (cachedWriter == null) {
                 ClientConfig clientConfig = getClientConfig(context);
-                final String scope = context.getProperty(PROP_SCOPE).getValue();
-                final String streamName = context.getProperty(PROP_STREAM).getValue();
-                logger.debug("getWriter: scope={}, streamName={}, this={}",
-                        new Object[]{scope, streamName, System.identityHashCode(this)});
+                final Stream stream = getStream(context);
+                logger.debug("getWriter: stream={}, this={}",
+                        new Object[]{stream, System.identityHashCode(this)});
                 final StreamConfiguration streamConfig = getStreamConfiguration(context);
                 try (final StreamManager streamManager = StreamManager.create(clientConfig)) {
-                    streamManager.createScope(scope);
-                    streamManager.createStream(scope, streamName, streamConfig);
+                    streamManager.createScope(stream.getScope());
+                    streamManager.createStream(stream.getScope(), stream.getStreamName(), streamConfig);
                 }
-                final ClientFactory clientFactory = ClientFactory.withScope(scope, clientConfig);
+                final ClientFactory clientFactory = ClientFactory.withScope(stream.getScope(), clientConfig);
                 final EventStreamWriter<byte[]> writer = clientFactory.createEventWriter(
-                        streamName,
+                        stream.getStreamName(),
                         new ByteArraySerializer(),
                         EventWriterConfig.builder().build());
 

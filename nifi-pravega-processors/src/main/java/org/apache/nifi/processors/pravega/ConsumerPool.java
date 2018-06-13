@@ -57,7 +57,7 @@ public class ConsumerPool implements AutoCloseable {
     private final Set<SimpleConsumerLease> activeLeases = new HashSet<>();
     private final ClientConfig clientConfig;
     private final String scope;
-    private final List<String> streamNames;
+    private final List<Stream> streams;
     final StreamConfiguration streamConfig;
     private final int maxConcurrentLeases;
     private final long checkpointPeriodMs;
@@ -96,7 +96,6 @@ public class ConsumerPool implements AutoCloseable {
      * below a certain threshold.
      *
      * @param maxConcurrentLeases max allowable consumers at once
-     * @param streamNames the streamNames to subscribe to
      * @param logger the logger to report any errors/warnings
      */
     public ConsumerPool(
@@ -110,8 +109,7 @@ public class ConsumerPool implements AutoCloseable {
             final long gracefulShutdownTimeoutMs,
             final long minimumProcessingTimeMs,
             final ClientConfig clientConfig,
-            final String scope,
-            final List<String> streamNames,
+            final List<Stream> streams,
             final StreamConfiguration streamConfig,
             final String streamCutMethod,
             final RecordReaderFactory readerFactory,
@@ -126,8 +124,8 @@ public class ConsumerPool implements AutoCloseable {
         this.gracefulShutdownTimeoutMs = gracefulShutdownTimeoutMs;
         this.minimumProcessingTimeMs = minimumProcessingTimeMs;
         this.clientConfig = clientConfig;
-        this.scope = scope;
-        this.streamNames = Collections.unmodifiableList(streamNames);
+        this.scope = streams.get(0).getScope();
+        this.streams = Collections.unmodifiableList(streams);
         this.streamConfig = streamConfig;
         this.readerFactory = readerFactory;
         this.writerFactory = writerFactory;
@@ -171,9 +169,9 @@ public class ConsumerPool implements AutoCloseable {
 
                             // Create streams.
                             try (final StreamManager streamManager = StreamManager.create(clientConfig)) {
-                                streamManager.createScope(scope);
-                                for (String streamName : streamNames) {
-                                    streamManager.createStream(scope, streamName, streamConfig);
+                                for (Stream stream : streams) {
+                                    streamManager.createScope(stream.getScope());
+                                    streamManager.createStream(stream.getScope(), stream.getStreamName(), streamConfig);
                                 }
                             }
 
@@ -191,15 +189,13 @@ public class ConsumerPool implements AutoCloseable {
                                 final Map<Stream, StreamCut> startingStreamCuts = new HashMap<>();
                                 if (streamCutMethod.equals(STREAM_CUT_LATEST.getValue())) {
                                     final BatchClient batchClient = clientFactory.createBatchClient();
-                                    for (String streamName : streamNames) {
-                                        Stream stream = Stream.of(scope, streamName);
+                                    for (Stream stream : streams) {
                                         StreamInfo streamInfo = batchClient.getStreamInfo(stream).join();
                                         StreamCut tailStreamCut = streamInfo.getTailStreamCut();
                                         startingStreamCuts.put(stream, tailStreamCut);
                                     }
                                 } else if (streamCutMethod.equals(STREAM_CUT_EARLIEST.getValue())) {
-                                    for (String streamName : streamNames) {
-                                        Stream stream = Stream.of(scope, streamName);
+                                    for (Stream stream : streams) {
                                         startingStreamCuts.put(stream, StreamCut.UNBOUNDED);
                                     }
                                 } else {
@@ -229,8 +225,8 @@ public class ConsumerPool implements AutoCloseable {
             throw e;
         }
 
-        logger.info("Using reader group {} to read from Pravega scope {}, streams {}.",
-                new Object[]{readerGroupName, scope, streamNames});
+        logger.info("Using reader group {} to read from {}.",
+                new Object[]{readerGroupName, streams});
 
         // Schedule periodic task to initiate checkpoints.
         // If any execution of this task takes longer than its period, then subsequent executions may start late, but will not concurrently execute.
@@ -244,7 +240,7 @@ public class ConsumerPool implements AutoCloseable {
                 "clientConfig=" + clientConfig +
                 ", maxConcurrentLeases=" + maxConcurrentLeases +
                 ", scope='" + scope + '\'' +
-                ", streamNames=" + streamNames +
+                ", streams=" + streams +
                 ", streamConfig=" + streamConfig +
                 ", checkpointPeriodMs=" + checkpointPeriodMs +
                 ", checkpointTimeoutMs=" + checkpointTimeoutMs +

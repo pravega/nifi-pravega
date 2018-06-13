@@ -2,6 +2,7 @@ package org.apache.nifi.processors.pravega;
 
 import io.pravega.client.ClientConfig;
 import io.pravega.client.stream.ScalingPolicy;
+import io.pravega.client.stream.Stream;
 import io.pravega.client.stream.StreamConfiguration;
 import org.apache.nifi.components.*;
 import org.apache.nifi.controller.NodeTypeProvider;
@@ -40,7 +41,7 @@ public abstract class AbstractPravegaProcessor extends AbstractSessionFactoryPro
     static final PropertyDescriptor PROP_SCOPE = new PropertyDescriptor.Builder()
             .name("scope")
             .displayName("Scope")
-            .description("The name of the Pravega scope.")
+            .description("The name of the default Pravega scope. This will be used for any unqualified stream names.")
             .required(true)
             .addValidator(StandardValidators.NON_BLANK_VALIDATOR)
             .build();
@@ -48,7 +49,8 @@ public abstract class AbstractPravegaProcessor extends AbstractSessionFactoryPro
     static final PropertyDescriptor PROP_STREAM = new PropertyDescriptor.Builder()
             .name("stream")
             .displayName("Stream Name")
-            .description("The name of the Pravega stream.")
+            .description("The name of the Pravega stream. Stream names may be contain a scope in the format 'scope/stream'. "
+                    + "Consumers may specify a comma-separated list.")
             .required(true)
             .addValidator(StandardValidators.NON_BLANK_VALIDATOR)
             .build();ComponentLog logger;
@@ -86,7 +88,7 @@ public abstract class AbstractPravegaProcessor extends AbstractSessionFactoryPro
 
     static final PropertyDescriptor PROP_SCALE_FACTOR = new PropertyDescriptor.Builder()
             .name("scale.factor")
-            .displayName("Scale Target Rate")
+            .displayName("Scale Factor")
             .description("")
             .required(true)
             .addValidator(StandardValidators.NON_NEGATIVE_INTEGER_VALIDATOR)
@@ -148,6 +150,62 @@ public abstract class AbstractPravegaProcessor extends AbstractSessionFactoryPro
                 .build();
         logger.debug("getStreamConfiguration: streamConfig={}", new Object[]{streamConfig});
         return streamConfig;
+    }
+
+    /**
+     * Resolves the given stream name.
+     *
+     * The scope name is resolved in the following order:
+     * 1. from the stream name (if fully-qualified)
+     * 2. from the default scope
+     *
+     * @param streamSpec a qualified or unqualified stream name
+     * @return a fully-qualified stream name
+     * @throws IllegalStateException if an unqualified stream name is supplied but the scope is not configured.
+     */
+    public static Stream resolveStream(String defaultScope, String streamSpec) {
+        if (streamSpec == null) {
+            throw new NullPointerException("streamSpec");
+        }
+        String[] split = streamSpec.split("/", 2);
+        if (split.length == 1) {
+            // unqualified
+            if (defaultScope == null) {
+                throw new IllegalStateException("The default scope is not configured.");
+            }
+            return Stream.of(defaultScope, split[0]);
+        } else {
+            // qualified
+            assert split.length == 2;
+            return Stream.of(split[0], split[1]);
+        }
+    }
+
+    public List<Stream> getStreams(final ProcessContext context) {
+        final String defaultScope = context.getProperty(PROP_SCOPE).getValue();
+        final String streamSpecs = context.getProperty(PROP_STREAM).getValue();
+        final String[] streamSpecsList = streamSpecs.split(",");
+        final List<Stream> streams = new ArrayList<>();
+        for (final String streamName : streamSpecsList) {
+            final String trimmedName = streamName.trim();
+            if (!trimmedName.isEmpty()) {
+                final Stream stream = resolveStream(defaultScope, streamName);
+                streams.add(stream);
+            }
+        }
+        if (streams.isEmpty()) {
+            throw new IllegalArgumentException("you must specify at least one stream");
+        }
+        logger.debug("getStreams: streams={}", new Object[]{streams});
+        return streams;
+    }
+
+    public Stream getStream(final ProcessContext context) {
+        final List<Stream> streams = getStreams(context);
+        if (streams.size() != 1) {
+            throw new IllegalArgumentException("you must specify exactly one stream");
+        }
+        return streams.get(0);
     }
 
     @Override

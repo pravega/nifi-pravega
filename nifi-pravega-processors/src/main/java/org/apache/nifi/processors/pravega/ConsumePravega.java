@@ -1,6 +1,7 @@
 package org.apache.nifi.processors.pravega;
 
 import io.pravega.client.ClientConfig;
+import io.pravega.client.stream.Stream;
 import io.pravega.client.stream.StreamConfiguration;
 import org.apache.nifi.annotation.behavior.InputRequirement;
 import org.apache.nifi.annotation.behavior.Stateful;
@@ -162,18 +163,15 @@ public class ConsumePravega extends AbstractPravegaProcessor {
     }
 
     protected ConsumerPool createConsumerPool(final ProcessContext context, final ProcessSessionFactory sessionFactory, final ComponentLog log) throws Exception {
+        final ClientConfig clientConfig = getClientConfig(context);
+        final List<Stream> streams = getStreams(context);
+        final StreamConfiguration streamConfig = getStreamConfiguration(context);
         final int maxConcurrentLeases = context.getMaxConcurrentTasks();
         final long checkpointPeriodMs = context.getProperty(PROP_CHECKPOINT_PERIOD).asTimePeriod(TimeUnit.MILLISECONDS);
         final long checkpointTimeoutMs = context.getProperty(PROP_CHECKPOINT_TIMEOUT).asTimePeriod(TimeUnit.MILLISECONDS);
         final long gracefulShutdownTimeoutMs = context.getProperty(PROP_STOP_TIMEOUT).asTimePeriod(TimeUnit.MILLISECONDS);
         final long minimumProcessingTimeMs = context.getProperty(PROP_MINIMUM_PROCESSING_TIME).asTimePeriod(TimeUnit.MILLISECONDS);
-        final ClientConfig clientConfig = getClientConfig(context);
-        final String scope = context.getProperty(PROP_SCOPE).getValue();
-        final String streamName = context.getProperty(PROP_STREAM).getValue();
-        final StreamConfiguration streamConfig = getStreamConfiguration(context);
         final String streamCutMethod = context.getProperty(PROP_STREAM_CUT_METHOD).getValue();
-        List<String> streamNames = new ArrayList<>();
-        streamNames.add(streamName);
         return new ConsumerPool(
                 log,
                 context.getStateManager(),
@@ -185,8 +183,7 @@ public class ConsumePravega extends AbstractPravegaProcessor {
                 gracefulShutdownTimeoutMs,
                 minimumProcessingTimeMs,
                 clientConfig,
-                scope,
-                streamNames,
+                streams,
                 streamConfig,
                 streamCutMethod,
                 null,
