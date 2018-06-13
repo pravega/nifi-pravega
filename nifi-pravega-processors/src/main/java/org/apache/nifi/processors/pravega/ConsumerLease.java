@@ -32,6 +32,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.TimeoutException;
 
+import static org.apache.nifi.processors.pravega.ConsumePravega.ATTR_EVENT_POINTER;
 import static org.apache.nifi.processors.pravega.ConsumePravega.REL_SUCCESS;
 import static org.apache.nifi.processors.pravega.ConsumerPool.CHECKPOINT_NAME_FINAL_PREFIX;
 
@@ -244,8 +245,7 @@ public abstract class ConsumerLease implements Closeable {
 
     private Map<String, String> getAttributes(final EventRead<byte[]> eventRead) {
         final Map<String, String> attributes = new HashMap<>();
-        attributes.put("pravega.event", eventRead.toString());
-        attributes.put("pravega.event.getEventPointer", eventRead.getEventPointer().toString());
+        attributes.put(ATTR_EVENT_POINTER, eventRead.getEventPointer().toString());
         return attributes;
     }
 

@@ -21,7 +21,6 @@ import org.apache.nifi.stream.io.StreamUtils;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
@@ -32,7 +31,9 @@ import java.util.concurrent.TimeUnit;
 @InputRequirement(InputRequirement.Requirement.INPUT_REQUIRED)
 @EventDriven
 @SupportsBatching
-@ReadsAttributes({@ReadsAttribute(attribute=PublishPravega.ATTR_ROUTING_KEY, description="The Pravega routing key")})
+@ReadsAttributes({
+        @ReadsAttribute(attribute=PublishPravega.ATTR_ROUTING_KEY, description="The Pravega routing key")
+})
 @SeeAlso({ConsumePravega.class})
 public class PublishPravega extends AbstractPravegaPublisher {
     static final List<PropertyDescriptor> descriptors;
@@ -99,8 +100,7 @@ public class PublishPravega extends AbstractPravegaPublisher {
                     final String flowFileUUID = flowFile.getAttribute(CoreAttributes.UUID.key());
                     logger.debug("routingKey={}, size={}, flowFileUUID={}",
                             new Object[]{routingKey, flowFile.getSize(), flowFileUUID});
-                    logger.debug("messageContentStr={}, messageContent={}", new Object[]{
-                            new String(messageContent, StandardCharsets.UTF_8), messageContent});
+                    logger.trace("messageContent={}", new Object[]{dumpByteArray(messageContent)});
                 }
 
                 // Write to Pravega.

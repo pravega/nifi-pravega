@@ -38,10 +38,13 @@ public abstract class AbstractPravegaProcessor extends AbstractSessionFactoryPro
             .addValidator(CONTROLLER_VALIDATOR)
             .build();
 
+    static final String STREAM_NAME_DESCRIPTION = "\nFor consumers, the state must be cleared in order for any change in the set of streams to become effective.";
+
     static final PropertyDescriptor PROP_SCOPE = new PropertyDescriptor.Builder()
             .name("scope")
             .displayName("Scope")
-            .description("The name of the default Pravega scope. This will be used for any unqualified stream names.")
+            .description("The name of the default Pravega scope. This will be used for any unqualified stream names."
+                    + STREAM_NAME_DESCRIPTION)
             .required(true)
             .addValidator(StandardValidators.NON_BLANK_VALIDATOR)
             .build();
@@ -50,10 +53,11 @@ public abstract class AbstractPravegaProcessor extends AbstractSessionFactoryPro
             .name("stream")
             .displayName("Stream Name")
             .description("The name of the Pravega stream. Stream names may be contain a scope in the format 'scope/stream'. "
-                    + "Consumers may specify a comma-separated list.")
+                    + "Consumers may specify a comma-separated list."
+                    + STREAM_NAME_DESCRIPTION)
             .required(true)
             .addValidator(StandardValidators.NON_BLANK_VALIDATOR)
-            .build();ComponentLog logger;
+            .build();
 
     static final AllowableValue SCALE_TYPE_FIXED_NUM_SEGMENTS = new AllowableValue(
             "FIXED_NUM_SEGMENTS",
@@ -61,17 +65,20 @@ public abstract class AbstractPravegaProcessor extends AbstractSessionFactoryPro
             "");
     static final AllowableValue SCALE_TYPE_BY_RATE_IN_KBYTES_PER_SEC = new AllowableValue(
             "BY_RATE_IN_KBYTES_PER_SEC",
-            "by rate in KB/sec",
-            "scale up/down to maintain the specified rate per segment");
+            "by data rate in KB/sec",
+            "Scale up/down the number of segments to maintain the specified data rate per segment. See 'Scale Target Rate'.");
     static final AllowableValue SCALE_TYPE_BY_RATE_IN_EVENTS_PER_SEC = new AllowableValue(
             "BY_RATE_IN_EVENTS_PER_SEC",
-            "by rate in events/sec",
-            "");
+            "by event rate in events/sec",
+            "Scale up/down the number of segments to maintain the specified event rate per segment. See 'Scale Target Rate'.");
+
+    static final String STREAM_CONFIG_DESCRIPTION = "\nThis setting will be ignored if the stream already exists.";
 
     static final PropertyDescriptor PROP_SCALE_TYPE = new PropertyDescriptor.Builder()
             .name("scale.type")
             .displayName("Scale Type")
-            .description("")
+            .description("Controls the scaling policy."
+                    + STREAM_CONFIG_DESCRIPTION)
             .required(true)
             .allowableValues(SCALE_TYPE_FIXED_NUM_SEGMENTS, SCALE_TYPE_BY_RATE_IN_KBYTES_PER_SEC, SCALE_TYPE_BY_RATE_IN_EVENTS_PER_SEC)
             .defaultValue(SCALE_TYPE_FIXED_NUM_SEGMENTS.getValue())
@@ -80,7 +87,9 @@ public abstract class AbstractPravegaProcessor extends AbstractSessionFactoryPro
     static final PropertyDescriptor PROP_SCALE_TARGET_RATE = new PropertyDescriptor.Builder()
             .name("scale.target.rate")
             .displayName("Scale Target Rate")
-            .description("")
+            .description("Units are defined in the Scale Type attribute. "
+                    + "Unused for 'fixed number of segments'."
+                    + STREAM_CONFIG_DESCRIPTION)
             .required(true)
             .addValidator(StandardValidators.NON_NEGATIVE_INTEGER_VALIDATOR)
             .defaultValue("100")
@@ -89,7 +98,10 @@ public abstract class AbstractPravegaProcessor extends AbstractSessionFactoryPro
     static final PropertyDescriptor PROP_SCALE_FACTOR = new PropertyDescriptor.Builder()
             .name("scale.factor")
             .displayName("Scale Factor")
-            .description("")
+            .description("Segments exceeding the specified rate will be split into this many segments. "
+                    + "Also, this many adjacent segments can be merged together if rates are lower than the specified rate. "
+                    + "Unused for 'fixed number of segments'."
+                    + STREAM_CONFIG_DESCRIPTION)
             .required(true)
             .addValidator(StandardValidators.NON_NEGATIVE_INTEGER_VALIDATOR)
             .defaultValue("2")
@@ -98,7 +110,8 @@ public abstract class AbstractPravegaProcessor extends AbstractSessionFactoryPro
     static final PropertyDescriptor PROP_SCALE_MIN_NUM_SEGMENTS = new PropertyDescriptor.Builder()
             .name("scale.min.num.segments")
             .displayName("Minimum Number of Segments")
-            .description("")
+            .description("The number of segments will never be below this."
+                    + STREAM_CONFIG_DESCRIPTION)
             .required(true)
             .addValidator(StandardValidators.POSITIVE_INTEGER_VALIDATOR)
             .defaultValue("1")
@@ -115,6 +128,8 @@ public abstract class AbstractPravegaProcessor extends AbstractSessionFactoryPro
         descriptors.add(PROP_SCALE_MIN_NUM_SEGMENTS);
         return descriptors;
     }
+
+    ComponentLog logger;
 
     public ClientConfig getClientConfig(final ProcessContext context) {
         try {

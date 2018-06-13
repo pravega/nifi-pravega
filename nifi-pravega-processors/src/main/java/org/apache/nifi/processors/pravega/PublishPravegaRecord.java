@@ -153,8 +153,7 @@ public class PublishPravegaRecord extends AbstractPravegaPublisher {
                                     final String flowFileUUID = flowFile.getAttribute(CoreAttributes.UUID.key());
                                     logger.debug("routingKey={}, size={}, flowFileUUID={}",
                                             new Object[]{routingKey, flowFile.getSize(), flowFileUUID});
-                                    logger.debug("messageContent={}", new Object[]{
-                                            dumpByteArray(messageContent)});
+                                    logger.trace("messageContent={}", new Object[]{dumpByteArray(messageContent)});
                                 }
 
                                 // Write to Pravega.

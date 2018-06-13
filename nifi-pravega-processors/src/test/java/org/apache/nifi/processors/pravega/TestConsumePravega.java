@@ -26,7 +26,7 @@ public class TestConsumePravega {
         // TODO: write tests
         System.out.println("hello");
 
-        final URI controllerURI = new URI("tcp://10.246.21.230:9090");
+        final URI controllerURI = new URI("tcp://localhost:9090");
         final String scope = "TestConsumePravega-" + UUID.randomUUID().toString();
         final String streamName = "stream1";
         final StreamConfiguration streamConfig = StreamConfiguration.builder()
