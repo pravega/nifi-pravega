@@ -47,9 +47,12 @@ public abstract class ConsumerLease implements Closeable {
     private final URI controllerURI;
     protected final EventStreamReader<byte[]> reader;
     protected final String readerId;
+    private final long checkpointTimeoutMs;// = 10000;
+    private final long minimumProcessingTimeMs;// = 100;
     private final ComponentLog logger;
     private final RecordSetWriterFactory writerFactory;
     private final RecordReaderFactory readerFactory;
+
     private boolean poisoned = false;
     private boolean lastCheckpointIsFinal = false;
 
@@ -57,19 +60,35 @@ public abstract class ConsumerLease implements Closeable {
             final URI controllerURI,
             final EventStreamReader<byte[]> reader,
             final String readerId,
+            final long checkpointTimeoutMs,
+            final long minimumProcessingTimeMs,
             final RecordReaderFactory readerFactory,
             final RecordSetWriterFactory writerFactory,
             final ComponentLog logger) {
         this.controllerURI = controllerURI;
         this.reader = reader;
         this.readerId = readerId;
+        this.checkpointTimeoutMs = checkpointTimeoutMs;
+        this.minimumProcessingTimeMs = minimumProcessingTimeMs;
         this.readerFactory = readerFactory;
         this.writerFactory = writerFactory;
         this.logger = logger;
+
+        logger.debug("Created {}", new Object[]{this.getConfigAsString()});
     }
 
+    @Override
     public String toString() {
         return String.format("ConsumerLease[readerId=%s]", readerId);
+    }
+
+    public String getConfigAsString() {
+        return "ConsumerLease{" +
+                "controllerURI=" + controllerURI +
+                ", readerId='" + readerId + '\'' +
+                ", checkpointTimeoutMs=" + checkpointTimeoutMs +
+                ", minimumProcessingTimeMs=" + minimumProcessingTimeMs +
+                '}';
     }
 
     private EventRead<byte[]> nextEventToRead = null;
@@ -94,8 +113,8 @@ public abstract class ConsumerLease implements Closeable {
         System.out.println("readEvents: BEGIN: " + this);
         long eventCount = 0;
         final long startTime = System.currentTimeMillis();
-        final long minStopTime = startTime + 100;
-        final long timeoutTime = startTime + 10000;
+        final long minStopTime = startTime + minimumProcessingTimeMs;
+        final long timeoutTime = startTime + checkpointTimeoutMs;
         try {
             while (true) {
                 EventRead<byte[]> eventRead = nextEventToRead;

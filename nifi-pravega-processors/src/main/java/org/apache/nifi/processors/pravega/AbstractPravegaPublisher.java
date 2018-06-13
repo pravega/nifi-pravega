@@ -73,9 +73,7 @@ public abstract class AbstractPravegaPublisher extends AbstractPravegaProcessor 
                 final String streamName = context.getProperty(PROP_STREAM).getValue();
                 logger.debug("getWriter: scope={}, streamName={}, this={}",
                         new Object[]{scope, streamName, System.identityHashCode(this)});
-                final StreamConfiguration streamConfig = StreamConfiguration.builder()
-                        .scalingPolicy(ScalingPolicy.fixed(8))
-                        .build();
+                final StreamConfiguration streamConfig = getStreamConfiguration(context);
 
                 // TODO: Create scope and stream based on additional properties.
                 try (final StreamManager streamManager = StreamManager.create(controllerURI)) {

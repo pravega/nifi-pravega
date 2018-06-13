@@ -1,9 +1,8 @@
 package org.apache.nifi.processors.pravega;
 
-import org.apache.nifi.components.PropertyDescriptor;
-import org.apache.nifi.components.ValidationContext;
-import org.apache.nifi.components.ValidationResult;
-import org.apache.nifi.components.Validator;
+import io.pravega.client.stream.ScalingPolicy;
+import io.pravega.client.stream.StreamConfiguration;
+import org.apache.nifi.components.*;
 import org.apache.nifi.controller.NodeTypeProvider;
 import org.apache.nifi.logging.ComponentLog;
 import org.apache.nifi.processor.*;
@@ -16,6 +15,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 public abstract class AbstractPravegaProcessor extends AbstractSessionFactoryProcessor {
+
     static final Validator CONTROLLER_VALIDATOR = new Validator() {
         @Override
         public ValidationResult validate(String subject, String input, ValidationContext context) {
@@ -27,34 +27,114 @@ public abstract class AbstractPravegaProcessor extends AbstractSessionFactoryPro
             return new ValidationResult.Builder().subject(subject).valid(true).build();
         }
     };
+
     static final PropertyDescriptor PROP_CONTROLLER = new PropertyDescriptor.Builder()
             .name("controller")
-            .displayName("Pravega Controller URI")
+            .displayName("Controller URI")
             .description("The URI of the Pravega controller (e.g. tcp://localhost:9090).")
             .required(true)
             .addValidator(CONTROLLER_VALIDATOR)
             .build();
+
     static final PropertyDescriptor PROP_SCOPE = new PropertyDescriptor.Builder()
             .name("scope")
-            .displayName("Pravega Scope")
+            .displayName("Scope")
             .description("The name of the Pravega scope.")
             .required(true)
             .addValidator(StandardValidators.NON_BLANK_VALIDATOR)
             .build();
+
     static final PropertyDescriptor PROP_STREAM = new PropertyDescriptor.Builder()
             .name("stream")
-            .displayName("Pravega Stream")
+            .displayName("Stream Name")
             .description("The name of the Pravega stream.")
             .required(true)
             .addValidator(StandardValidators.NON_BLANK_VALIDATOR)
             .build();ComponentLog logger;
+
+    static final AllowableValue SCALE_TYPE_FIXED_NUM_SEGMENTS = new AllowableValue(
+            "FIXED_NUM_SEGMENTS",
+            "fixed number of segments",
+            "");
+    static final AllowableValue SCALE_TYPE_BY_RATE_IN_KBYTES_PER_SEC = new AllowableValue(
+            "BY_RATE_IN_KBYTES_PER_SEC",
+            "by rate in KB/sec",
+            "scale up/down to maintain the specified rate per segment");
+    static final AllowableValue SCALE_TYPE_BY_RATE_IN_EVENTS_PER_SEC = new AllowableValue(
+            "BY_RATE_IN_EVENTS_PER_SEC",
+            "by rate in events/sec",
+            "");
+
+    static final PropertyDescriptor PROP_SCALE_TYPE = new PropertyDescriptor.Builder()
+            .name("scale.type")
+            .displayName("Scale Type")
+            .description("")
+            .required(true)
+            .allowableValues(SCALE_TYPE_FIXED_NUM_SEGMENTS, SCALE_TYPE_BY_RATE_IN_KBYTES_PER_SEC, SCALE_TYPE_BY_RATE_IN_EVENTS_PER_SEC)
+            .defaultValue(SCALE_TYPE_FIXED_NUM_SEGMENTS.getValue())
+            .build();
+
+    static final PropertyDescriptor PROP_SCALE_TARGET_RATE = new PropertyDescriptor.Builder()
+            .name("scale.target.rate")
+            .displayName("Scale Target Rate")
+            .description("")
+            .required(true)
+            .addValidator(StandardValidators.NON_NEGATIVE_INTEGER_VALIDATOR)
+            .defaultValue("100")
+            .build();
+
+    static final PropertyDescriptor PROP_SCALE_FACTOR = new PropertyDescriptor.Builder()
+            .name("scale.factor")
+            .displayName("Scale Target Rate")
+            .description("")
+            .required(true)
+            .addValidator(StandardValidators.NON_NEGATIVE_INTEGER_VALIDATOR)
+            .defaultValue("2")
+            .build();
+
+    static final PropertyDescriptor PROP_SCALE_MIN_NUM_SEGMENTS = new PropertyDescriptor.Builder()
+            .name("scale.min.num.segments")
+            .displayName("Minimum Number of Segments")
+            .description("")
+            .required(true)
+            .addValidator(StandardValidators.POSITIVE_INTEGER_VALIDATOR)
+            .defaultValue("1")
+            .build();
 
     static List<PropertyDescriptor> getAbstractPropertyDescriptors(){
         final List<PropertyDescriptor> descriptors = new ArrayList<PropertyDescriptor>();
         descriptors.add(PROP_CONTROLLER);
         descriptors.add(PROP_SCOPE);
         descriptors.add(PROP_STREAM);
+        descriptors.add(PROP_SCALE_TYPE);
+        descriptors.add(PROP_SCALE_TARGET_RATE);
+        descriptors.add(PROP_SCALE_FACTOR);
+        descriptors.add(PROP_SCALE_MIN_NUM_SEGMENTS);
         return descriptors;
+    }
+
+    public StreamConfiguration getStreamConfiguration(final ProcessContext context) {
+        final ScalingPolicy.ScaleType scaleType = ScalingPolicy.ScaleType.valueOf(context.getProperty(PROP_SCALE_TYPE).getValue());
+        final int targetRate = Integer.parseInt(context.getProperty(PROP_SCALE_TARGET_RATE).getValue());
+        final int scaleFactor = Integer.parseInt(context.getProperty(PROP_SCALE_FACTOR).getValue());
+        final int minNumSegments = Integer.parseInt(context.getProperty(PROP_SCALE_MIN_NUM_SEGMENTS).getValue());
+        ScalingPolicy scalingPolicy;
+        switch (scaleType) {
+            case BY_RATE_IN_EVENTS_PER_SEC:
+                scalingPolicy = ScalingPolicy.byEventRate(targetRate, scaleFactor, minNumSegments);
+                break;
+            case BY_RATE_IN_KBYTES_PER_SEC:
+                scalingPolicy = ScalingPolicy.byDataRate(targetRate, scaleFactor, minNumSegments);
+                break;
+            case FIXED_NUM_SEGMENTS:
+            default:
+                scalingPolicy = ScalingPolicy.fixed(minNumSegments);
+        }
+        final StreamConfiguration streamConfig = StreamConfiguration.builder()
+                .scalingPolicy(scalingPolicy)
+                .build();
+        logger.debug("getStreamConfiguration: streamConfig={}", new Object[]{streamConfig});
+        return streamConfig;
     }
 
     @Override

@@ -1,6 +1,5 @@
 package org.apache.nifi.processors.pravega;
 
-import io.pravega.client.stream.ScalingPolicy;
 import io.pravega.client.stream.StreamConfiguration;
 import org.apache.nifi.annotation.behavior.InputRequirement;
 import org.apache.nifi.annotation.behavior.Stateful;
@@ -9,6 +8,7 @@ import org.apache.nifi.annotation.documentation.SeeAlso;
 import org.apache.nifi.annotation.documentation.Tags;
 import org.apache.nifi.annotation.lifecycle.OnStopped;
 import org.apache.nifi.annotation.lifecycle.OnUnscheduled;
+import org.apache.nifi.components.AllowableValue;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.components.state.Scope;
 import org.apache.nifi.logging.ComponentLog;
@@ -32,31 +32,57 @@ import java.util.concurrent.TimeUnit;
 @SeeAlso({PublishPravega.class})
 public class ConsumePravega extends AbstractPravegaProcessor {
 
-//    static final AllowableValue OFFSET_EARLIEST = new AllowableValue("earliest", "earliest", "Automatically reset the offset to the earliest offset");
-//
-//    static final AllowableValue OFFSET_LATEST = new AllowableValue("latest", "latest", "Automatically reset the offset to the latest offset");
-//
-//    static final AllowableValue OFFSET_NONE = new AllowableValue("none", "none", "Throw exception to the consumer if no previous offset is found for the consumer's group");
-//
-//    static final PropertyDescriptor AUTO_OFFSET_RESET = new PropertyDescriptor.Builder()
-//            .name(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG)
-//            .displayName("Offset Reset")
-//            .description("Allows you to manage the condition when there is no initial offset in Kafka or if the current offset does not exist any "
-//                    + "more on the server (e.g. because that data has been deleted). Corresponds to Kafka's 'auto.offset.reset' property.")
-//            .required(true)
-//            .allowableValues(OFFSET_EARLIEST, OFFSET_LATEST, OFFSET_NONE)
-//            .defaultValue(OFFSET_LATEST.getValue())
-//            .build();
+    static final AllowableValue STREAM_CUT_EARLIEST = new AllowableValue(
+            "earliest",
+            "earliest",
+            "");
+    static final AllowableValue STREAM_CUT_LATEST = new AllowableValue(
+            "latest",
+            "latest",
+            "");
 
-    static final PropertyDescriptor MAX_UNCOMMITTED_TIME = new PropertyDescriptor.Builder()
-            .name("max-uncommit-offset-wait")
-            .displayName("Max Uncommitted Time")
-            .description("Specifies the maximum amount of time allowed to pass before offsets must be committed. "
-                    + "This value impacts how often offsets will be committed.  Committing offsets less often increases "
-                    + "throughput but also increases the window of potential data duplication in the event of a rebalance "
-                    + "or JVM restart between commits.")
-            .required(false)
+    static final PropertyDescriptor PROP_STREAM_CUT_METHOD = new PropertyDescriptor.Builder()
+            .name("stream.cut.method")
+            .displayName("Stream Cut")
+            .description("If there is not a stream cut saved in the cluster state of this processor, then this specifies where to start.")
+            .required(true)
+            .allowableValues(STREAM_CUT_EARLIEST, STREAM_CUT_LATEST)
+            .defaultValue(STREAM_CUT_LATEST.getValue())
+            .build();
+
+    static final PropertyDescriptor PROP_CHECKPOINT_PERIOD = new PropertyDescriptor.Builder()
+            .name("checkpoint.period")
+            .displayName("Checkpoint Period")
+            .description("")
+            .required(true)
             .defaultValue("1 secs")
+            .addValidator(StandardValidators.TIME_PERIOD_VALIDATOR)
+            .build();
+
+    static final PropertyDescriptor PROP_CHECKPOINT_TIMEOUT = new PropertyDescriptor.Builder()
+            .name("checkpoint.timeout")
+            .displayName("Checkpoint Timeout")
+            .description("")
+            .required(true)
+            .defaultValue("10 secs")
+            .addValidator(StandardValidators.TIME_PERIOD_VALIDATOR)
+            .build();
+
+    static final PropertyDescriptor PROP_STOP_TIMEOUT = new PropertyDescriptor.Builder()
+            .name("stop.timeout")
+            .displayName("Stop Timeout")
+            .description("")
+            .required(true)
+            .defaultValue("60 secs")
+            .addValidator(StandardValidators.TIME_PERIOD_VALIDATOR)
+            .build();
+
+    static final PropertyDescriptor PROP_MINIMUM_PROCESSING_TIME = new PropertyDescriptor.Builder()
+            .name("minimum.processing.time")
+            .displayName("Minimum Processing Time")
+            .description("")
+            .required(true)
+            .defaultValue("100 ms")
             .addValidator(StandardValidators.TIME_PERIOD_VALIDATOR)
             .build();
 
@@ -72,7 +98,11 @@ public class ConsumePravega extends AbstractPravegaProcessor {
 
     static {
         final List<PropertyDescriptor> descriptors = getAbstractPropertyDescriptors();
-        descriptors.add(MAX_UNCOMMITTED_TIME);
+        descriptors.add(PROP_STREAM_CUT_METHOD);
+        descriptors.add(PROP_CHECKPOINT_PERIOD);
+        descriptors.add(PROP_CHECKPOINT_TIMEOUT);
+        descriptors.add(PROP_STOP_TIMEOUT);
+        descriptors.add(PROP_MINIMUM_PROCESSING_TIME);
         DESCRIPTORS = Collections.unmodifiableList(descriptors);
         RELATIONSHIPS = Collections.singleton(REL_SUCCESS);
     }
@@ -131,15 +161,17 @@ public class ConsumePravega extends AbstractPravegaProcessor {
     }
 
     protected ConsumerPool createConsumerPool(final ProcessContext context, final ProcessSessionFactory sessionFactory, final ComponentLog log) throws Exception {
-        final int maxLeases = context.getMaxConcurrentTasks();
-        logger.debug("createConsumerPool: maxLeases={}", new Object[]{maxLeases});
-        final long maxUncommittedTime = context.getProperty(MAX_UNCOMMITTED_TIME).asTimePeriod(TimeUnit.MILLISECONDS);
+        final int maxConcurrentLeases = context.getMaxConcurrentTasks();
+        logger.debug("createConsumerPool: maxConcurrentLeases={}", new Object[]{maxConcurrentLeases});
+        final long checkpointPeriodMs = context.getProperty(PROP_CHECKPOINT_PERIOD).asTimePeriod(TimeUnit.MILLISECONDS);
+        final long checkpointTimeoutMs = context.getProperty(PROP_CHECKPOINT_TIMEOUT).asTimePeriod(TimeUnit.MILLISECONDS);
+        final long gracefulShutdownTimeoutMs = context.getProperty(PROP_STOP_TIMEOUT).asTimePeriod(TimeUnit.MILLISECONDS);
+        final long minimumProcessingTimeMs = context.getProperty(PROP_MINIMUM_PROCESSING_TIME).asTimePeriod(TimeUnit.MILLISECONDS);
         final URI controllerURI = new URI(context.getProperty(PROP_CONTROLLER).getValue());
         final String scope = context.getProperty(PROP_SCOPE).getValue();
         final String streamName = context.getProperty(PROP_STREAM).getValue();
-        final StreamConfiguration streamConfig = StreamConfiguration.builder()
-                .scalingPolicy(ScalingPolicy.fixed(1))
-                .build();
+        final StreamConfiguration streamConfig = getStreamConfiguration(context);
+        final String streamCutMethod = context.getProperty(PROP_STREAM_CUT_METHOD).getValue();
         List<String> streamNames = new ArrayList<>();
         streamNames.add(streamName);
         return new ConsumerPool(
@@ -147,12 +179,16 @@ public class ConsumePravega extends AbstractPravegaProcessor {
                 context.getStateManager(),
                 sessionFactory,
                 this::isPrimaryNode,
-                maxLeases,
-                maxUncommittedTime,
+                maxConcurrentLeases,
+                checkpointPeriodMs,
+                checkpointTimeoutMs,
+                gracefulShutdownTimeoutMs,
+                minimumProcessingTimeMs,
                 controllerURI,
                 scope,
                 streamNames,
                 streamConfig,
+                streamCutMethod,
                 null,
                 null);
     }

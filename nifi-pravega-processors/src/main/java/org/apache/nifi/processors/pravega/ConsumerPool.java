@@ -19,6 +19,8 @@ package org.apache.nifi.processors.pravega;
 import io.pravega.client.ClientFactory;
 import io.pravega.client.admin.ReaderGroupManager;
 import io.pravega.client.admin.StreamManager;
+import io.pravega.client.batch.BatchClient;
+import io.pravega.client.batch.StreamInfo;
 import io.pravega.client.stream.*;
 import io.pravega.client.stream.impl.ByteArraySerializer;
 import org.apache.nifi.components.state.Scope;
@@ -41,6 +43,9 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
+import static org.apache.nifi.processors.pravega.ConsumePravega.STREAM_CUT_EARLIEST;
+import static org.apache.nifi.processors.pravega.ConsumePravega.STREAM_CUT_LATEST;
+
 /**
  * A pool of Pravega Readers for a given stream.
  * This maps to a Pravega Reader Group.
@@ -54,8 +59,10 @@ public class ConsumerPool implements AutoCloseable {
     private final String scope;
     private final List<String> streamNames;
     final StreamConfiguration streamConfig;
-    // TODO: add variables to identify where in streams to start (head, tail, stream cuts)
-    private final long maxWaitMillis;
+    private final long checkpointPeriodMs;
+    private final long checkpointTimeoutMs;
+    private final long gracefulShutdownTimeoutMs;
+    private final long minimumProcessingTimeMs;
     private final ComponentLog logger;
     private final RecordReaderFactory readerFactory;
     private final RecordSetWriterFactory writerFactory;
@@ -89,8 +96,6 @@ public class ConsumerPool implements AutoCloseable {
      *
      * @param maxConcurrentLeases max allowable consumers at once
      * @param streamNames the streamNames to subscribe to
-     * @param maxWaitMillis maximum time to wait for a given lease to acquire
-     * data before committing
      * @param logger the logger to report any errors/warnings
      */
     public ConsumerPool(
@@ -99,18 +104,25 @@ public class ConsumerPool implements AutoCloseable {
             final ProcessSessionFactory sessionFactory,
             final Supplier<Boolean> isPrimaryNode,
             final int maxConcurrentLeases,
-            final long maxWaitMillis,
+            final long checkpointPeriodMs,
+            final long checkpointTimeoutMs,
+            final long gracefulShutdownTimeoutMs,
+            final long minimumProcessingTimeMs,
             final URI controllerURI,
             final String scope,
             final List<String> streamNames,
             final StreamConfiguration streamConfig,
+            final String streamCutMethod,
             final RecordReaderFactory readerFactory,
             final RecordSetWriterFactory writerFactory) throws Exception {
         this.logger = logger;
         this.stateManager = stateManager;
         this.sessionFactory = sessionFactory;
         this.isPrimaryNode = isPrimaryNode;
-        this.maxWaitMillis = maxWaitMillis;
+        this.checkpointPeriodMs = checkpointPeriodMs;
+        this.checkpointTimeoutMs = checkpointTimeoutMs;
+        this.gracefulShutdownTimeoutMs = gracefulShutdownTimeoutMs;
+        this.minimumProcessingTimeMs = minimumProcessingTimeMs;
         this.controllerURI = controllerURI;
         this.scope = scope;
         this.streamNames = Collections.unmodifiableList(streamNames);
@@ -175,11 +187,23 @@ public class ConsumerPool implements AutoCloseable {
                             } else {
                                 // Determine starting stream cuts.
                                 final Map<Stream, StreamCut> startingStreamCuts = new HashMap<>();
-                                for (String streamName : streamNames) {
-                                    Stream stream = Stream.of(scope, streamName);
-                                    // TODO: get tail stream cut if requested
-                                    startingStreamCuts.put(stream, StreamCut.UNBOUNDED);
+                                if (streamCutMethod.equals(STREAM_CUT_LATEST.getValue())) {
+                                    final BatchClient batchClient = clientFactory.createBatchClient();
+                                    for (String streamName : streamNames) {
+                                        Stream stream = Stream.of(scope, streamName);
+                                        StreamInfo streamInfo = batchClient.getStreamInfo(stream).join();
+                                        StreamCut tailStreamCut = streamInfo.getTailStreamCut();
+                                        startingStreamCuts.put(stream, tailStreamCut);
+                                    }
+                                } else if (streamCutMethod.equals(STREAM_CUT_EARLIEST.getValue())) {
+                                    for (String streamName : streamNames) {
+                                        Stream stream = Stream.of(scope, streamName);
+                                        startingStreamCuts.put(stream, StreamCut.UNBOUNDED);
+                                    }
+                                } else {
+                                    throw new Exception("Invalid stream cut method " + streamCutMethod);
                                 }
+                                logger.debug("ConsumerPool: startingStreamCuts={}", new Object[]{startingStreamCuts});
                                 builder = builder.startFromStreamCuts(startingStreamCuts);
                             }
                             final ReaderGroupConfig readerGroupConfig = builder.build();
@@ -207,7 +231,23 @@ public class ConsumerPool implements AutoCloseable {
                 new Object[]{readerGroupName, scope, streamNames});
 
         // Schedule periodic task to initiate checkpoints.
-        performCheckpointExecutor.scheduleWithFixedDelay(this::performRegularCheckpoint, 1000, 1000, TimeUnit.MILLISECONDS);
+        // If any execution of this task takes longer than its period, then subsequent executions may start late, but will not concurrently execute.
+        performCheckpointExecutor.scheduleAtFixedRate(this::performRegularCheckpoint, checkpointPeriodMs, checkpointPeriodMs, TimeUnit.MILLISECONDS);
+
+        logger.debug("Created {}", new Object[]{this.getConfigAsString()});
+    }
+
+    public String getConfigAsString() {
+        return "ConsumerPool{" +
+                "controllerURI=" + controllerURI +
+                ", scope='" + scope + '\'' +
+                ", streamNames=" + streamNames +
+                ", streamConfig=" + streamConfig +
+                ", checkpointPeriodMs=" + checkpointPeriodMs +
+                ", checkpointTimeoutMs=" + checkpointTimeoutMs +
+                ", gracefulShutdownTimeoutMs=" + gracefulShutdownTimeoutMs +
+                ", minimumProcessingTimeMs=" + minimumProcessingTimeMs +
+                '}';
     }
 
     private void performRegularCheckpoint() {
@@ -234,7 +274,7 @@ public class ConsumerPool implements AutoCloseable {
                     logger.debug("performCheckpoint: Calling initiateCheckpoint; checkpointName={}", new Object[]{checkpointName});
                     CompletableFuture<Checkpoint> checkpointFuture = readerGroup.initiateCheckpoint(checkpointName, initiateCheckpointExecutor);
                     logger.debug("performCheckpoint: Got future.");
-                    Checkpoint checkpoint = checkpointFuture.get(10000, TimeUnit.MILLISECONDS);
+                    Checkpoint checkpoint = checkpointFuture.get(checkpointTimeoutMs, TimeUnit.MILLISECONDS);
                     logger.debug("performCheckpoint: Checkpoint completed; checkpoint={}, positions={}", new Object[]{checkpoint, checkpoint.asImpl().getPositions()});
                     // Get serialized checkpoint byte array and convert to base64 string.
                     String checkpointStr = new String(Base64.getEncoder().encode(checkpoint.toBytes().array()));
@@ -287,7 +327,7 @@ public class ConsumerPool implements AutoCloseable {
                 logger.debug("gracefulShutdown: waiting for checkpoint scheduler executor to terminate");
                 try {
                     // If a checkpoint is already in progress, wait for it.
-                    performCheckpointExecutor.awaitTermination(60000, TimeUnit.MILLISECONDS);
+                    performCheckpointExecutor.awaitTermination(checkpointTimeoutMs, TimeUnit.MILLISECONDS);
                 } catch (InterruptedException e) {
                     logger.error("gracefulShutdown", e);
                 }
@@ -330,7 +370,7 @@ public class ConsumerPool implements AutoCloseable {
 
             // Wait for above tasks to complete (possibly with an exception).
             gracefulShutdownExecutor.shutdown();
-            gracefulShutdownExecutor.awaitTermination(60000, TimeUnit.MILLISECONDS);
+            gracefulShutdownExecutor.awaitTermination(gracefulShutdownTimeoutMs, TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
             throw new RuntimeException(e);
         } finally {
@@ -416,8 +456,8 @@ public class ConsumerPool implements AutoCloseable {
         performCheckpointExecutor.shutdownNow();
         initiateCheckpointExecutor.shutdownNow();
         try {
-            performCheckpointExecutor.awaitTermination(10000, TimeUnit.MILLISECONDS);
-            initiateCheckpointExecutor.awaitTermination(10000, TimeUnit.MILLISECONDS);
+            performCheckpointExecutor.awaitTermination(checkpointTimeoutMs, TimeUnit.MILLISECONDS);
+            initiateCheckpointExecutor.awaitTermination(checkpointTimeoutMs, TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
             logger.error("ConsumerPool.close: Exception", e);
             System.out.println(e);
@@ -448,7 +488,15 @@ public class ConsumerPool implements AutoCloseable {
         private volatile boolean closedConsumer;
 
         private SimpleConsumerLease(final EventStreamReader<byte[]> reader, final String readerId) {
-            super(controllerURI, reader, readerId, readerFactory, writerFactory, logger);
+            super(
+                    controllerURI,
+                    reader,
+                    readerId,
+                    checkpointTimeoutMs,
+                    minimumProcessingTimeMs,
+                    readerFactory,
+                    writerFactory,
+                    logger);
         }
 
         void setProcessSession(final ProcessSession session, final ProcessContext context) {
