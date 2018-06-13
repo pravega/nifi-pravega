@@ -24,7 +24,6 @@ public class TestConsumePravega {
     @Ignore()
     public void testProcessor() throws Exception {
         // TODO: write tests
-        System.out.println("hello");
 
         final URI controllerURI = new URI("tcp://localhost:9090");
         final String scope = "TestConsumePravega-" + UUID.randomUUID().toString();

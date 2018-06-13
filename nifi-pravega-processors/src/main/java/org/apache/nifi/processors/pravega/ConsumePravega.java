@@ -140,7 +140,7 @@ public class ConsumePravega extends AbstractPravegaProcessor {
 
     @OnUnscheduled
     public void onUnscheduled(final ProcessContext context) {
-        System.out.println("ConsumePravega.onUnscheduled: BEGIN");
+        logger.debug("ConsumePravega.onUnscheduled: BEGIN");
         // AbstractSessionFactoryProcessor.updateScheduledFalse is annotated with @OnUnscheduled but we are unsure
         // if it was already called. Therefore, we ensure that it is called here.
         updateScheduledFalse();
@@ -148,13 +148,12 @@ public class ConsumePravega extends AbstractPravegaProcessor {
         if (pool != null) {
             pool.gracefulShutdown(context);
         }
-        System.out.println("ConsumePravega.onUnscheduled: END");
+        logger.debug("ConsumePravega.onUnscheduled: END");
     }
 
     @OnStopped
     public void close(final ProcessContext context) {
         logger.info("ConsumePravega.close: BEGIN");
-        System.out.println("ConsumePravega.close: BEGIN");
         ConsumerPool pool;
         synchronized (this) {
             pool = consumerPool;
@@ -164,7 +163,6 @@ public class ConsumePravega extends AbstractPravegaProcessor {
             pool.close();
         }
         logger.info("ConsumePravega.close: END");
-        System.out.println("ConsumePravega.close: END");
     }
 
     private synchronized ConsumerPool getConsumerPool(final ProcessContext context, final ProcessSessionFactory sessionFactory) throws Exception {
@@ -207,25 +205,20 @@ public class ConsumePravega extends AbstractPravegaProcessor {
     @Override
     public void onTrigger(final ProcessContext context, final ProcessSessionFactory sessionFactory, final ProcessSession session) throws ProcessException {
         logger.debug("onTrigger: BEGIN");
-        System.out.println("onTrigger: BEGIN");
         try {
             final ConsumerPool pool = getConsumerPool(context, sessionFactory);
-            System.out.println("onTrigger: Return from getConsumerPool");
             if (pool == null) {
                 context.yield();
             } else {
                 try (final ConsumerLease lease = pool.obtainConsumer(session, context)) {
-                    System.out.println("onTrigger: Return from obtainConsumer");
                     if (lease == null) {
                         context.yield();
                     } else {
                         try {
                             if (this.isScheduled()) {
-                                System.out.println("onTrigger: Calling readEvents");
                                 if (!lease.readEvents()) {
                                     context.yield();
                                 }
-                                System.out.println("onTrigger: Return from readEvents");
                             }
                         } catch (final Throwable t) {
                             logger.error("Exception while processing data from Pravega so will close the lease {} due to {}",
@@ -240,12 +233,9 @@ public class ConsumePravega extends AbstractPravegaProcessor {
             logger.info("onTrigger: ProcessorNotReadyException", new Object[]{e});
             context.yield();
         } catch (final Exception e) {
-            logger.info("onTrigger: Exception", new Object[]{e});
-            System.out.println("onTrigger: Exception: " + e.toString());
             throw new RuntimeException(e);
         }
         logger.debug("onTrigger: END");
-        System.out.println("onTrigger: END");
     }
 
 }

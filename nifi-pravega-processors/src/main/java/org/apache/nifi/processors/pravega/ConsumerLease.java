@@ -111,7 +111,6 @@ public abstract class ConsumerLease implements Closeable {
      */
     boolean readEvents() {
         logger.debug("readEvents: BEGIN: {}", new Object[]{this.toString()});
-        System.out.println("readEvents: BEGIN: " + this);
         long eventCount = 0;
         final long startTime = System.currentTimeMillis();
         final long minStopTime = startTime + minimumProcessingTimeMs;
@@ -123,13 +122,10 @@ public abstract class ConsumerLease implements Closeable {
                 if (eventRead == null) {
                     final long readTimeoutTime = Math.max(0, timeoutTime - System.currentTimeMillis());
                     logger.debug("readEvents: {}:  Calling readNextEvent with readTimeoutTime={}", new Object[]{this, readTimeoutTime});
-                    System.out.println("readEvents: " + this + ": Calling readNextEvent with readTimeoutTime=" + readTimeoutTime);
                     eventRead = reader.readNextEvent(readTimeoutTime);
                     logger.debug("readEvents: eventRead={}", new Object[]{eventRead});
-                    System.out.println("readEvents: " + this + ": eventRead=" + eventRead.toString());
                 } else {
                     logger.debug("readEvents: (saved) eventRead={}", new Object[]{eventRead});
-                    System.out.println("readEvents: " + this + ": (saved) eventRead=" + eventRead.toString());
                 }
                 if (eventRead.isCheckpoint()) {
                     // If a checkpoint was in the queue, it will be the first event returned.
@@ -150,11 +146,9 @@ public abstract class ConsumerLease implements Closeable {
                     lastCheckpointIsFinal = isFinalCheckpoint;
                     if (isFinalCheckpoint) {
                         logger.debug("readEvents: got final checkpoint");
-                        System.out.println("readEvents: END: " + this + ": Returning due to final checkpoint");
                         return false;
                     }
                     if (System.currentTimeMillis() > minStopTime) {
-                        System.out.println("readEvents: END: " + this + ": Returning due to non-final checkpoint");
                         return true;
                     }
                     eventCount = 0;
@@ -175,18 +169,14 @@ public abstract class ConsumerLease implements Closeable {
         // We should throw a ProcessException if onTrigger should be called again immediately.
         // Otherwise, the processor will be administratively yielded for 10 seconds.
         catch (final ProcessException e) {
-            System.out.println("readEvents: END: " + this + ": Exception: " + e.toString());
             throw e;
         } catch (final ReinitializationRequiredException e) {
-            System.out.println("readEvents: END: " + this + ": Exception: " + e.toString());
             this.poison();
             throw new ProcessException(e);
         } catch (final TimeoutException e) {
-            System.out.println("readEvents: END: " + this + ": Exception: " + e.toString());
             this.poison();
             throw new RuntimeException(e);
         } catch (final Throwable e) {
-            System.out.println("readEvents: END: " + this + ": Exception: " + e.toString());
             this.poison();
             throw e;
         }
