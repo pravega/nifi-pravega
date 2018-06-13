@@ -1,5 +1,6 @@
 package org.apache.nifi.processors.pravega;
 
+import io.pravega.client.ClientConfig;
 import io.pravega.client.stream.ScalingPolicy;
 import io.pravega.client.stream.StreamConfiguration;
 import org.apache.nifi.components.*;
@@ -111,6 +112,18 @@ public abstract class AbstractPravegaProcessor extends AbstractSessionFactoryPro
         descriptors.add(PROP_SCALE_FACTOR);
         descriptors.add(PROP_SCALE_MIN_NUM_SEGMENTS);
         return descriptors;
+    }
+
+    public ClientConfig getClientConfig(final ProcessContext context) {
+        try {
+            final URI controllerURI = new URI(context.getProperty(PROP_CONTROLLER).getValue());
+            final ClientConfig clientConfig = ClientConfig.builder()
+                    .controllerURI(controllerURI)
+                    .build();
+            return clientConfig;
+        } catch (final URISyntaxException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     public StreamConfiguration getStreamConfiguration(final ProcessContext context) {

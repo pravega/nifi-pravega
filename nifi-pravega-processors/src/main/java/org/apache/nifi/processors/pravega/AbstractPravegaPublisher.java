@@ -1,18 +1,16 @@
 package org.apache.nifi.processors.pravega;
 
+import io.pravega.client.ClientConfig;
 import io.pravega.client.ClientFactory;
 import io.pravega.client.admin.StreamManager;
 import io.pravega.client.stream.EventStreamWriter;
 import io.pravega.client.stream.EventWriterConfig;
-import io.pravega.client.stream.ScalingPolicy;
 import io.pravega.client.stream.StreamConfiguration;
 import io.pravega.client.stream.impl.ByteArraySerializer;
 import org.apache.nifi.annotation.lifecycle.OnStopped;
 import org.apache.nifi.processor.ProcessContext;
 import org.apache.nifi.processor.Relationship;
 
-import java.net.URI;
-import java.net.URISyntaxException;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
@@ -63,25 +61,17 @@ public abstract class AbstractPravegaPublisher extends AbstractPravegaProcessor 
         synchronized (this) {
             logger.debug("getWriter: this={}", new Object[]{System.identityHashCode(this)});
             if (cachedWriter == null) {
-                URI controllerURI;
-                try {
-                    controllerURI = new URI(context.getProperty(PROP_CONTROLLER).getValue());
-                } catch (URISyntaxException e) {
-                    throw new RuntimeException(e);
-                }
+                ClientConfig clientConfig = getClientConfig(context);
                 final String scope = context.getProperty(PROP_SCOPE).getValue();
                 final String streamName = context.getProperty(PROP_STREAM).getValue();
                 logger.debug("getWriter: scope={}, streamName={}, this={}",
                         new Object[]{scope, streamName, System.identityHashCode(this)});
                 final StreamConfiguration streamConfig = getStreamConfiguration(context);
-
-                // TODO: Create scope and stream based on additional properties.
-                try (final StreamManager streamManager = StreamManager.create(controllerURI)) {
+                try (final StreamManager streamManager = StreamManager.create(clientConfig)) {
                     streamManager.createScope(scope);
                     streamManager.createStream(scope, streamName, streamConfig);
                 }
-
-                final ClientFactory clientFactory = ClientFactory.withScope(scope, controllerURI);
+                final ClientFactory clientFactory = ClientFactory.withScope(scope, clientConfig);
                 final EventStreamWriter<byte[]> writer = clientFactory.createEventWriter(
                         streamName,
                         new ByteArraySerializer(),

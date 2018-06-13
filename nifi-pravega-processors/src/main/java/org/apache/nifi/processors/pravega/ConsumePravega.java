@@ -1,5 +1,6 @@
 package org.apache.nifi.processors.pravega;
 
+import io.pravega.client.ClientConfig;
 import io.pravega.client.stream.StreamConfiguration;
 import org.apache.nifi.annotation.behavior.InputRequirement;
 import org.apache.nifi.annotation.behavior.Stateful;
@@ -162,12 +163,11 @@ public class ConsumePravega extends AbstractPravegaProcessor {
 
     protected ConsumerPool createConsumerPool(final ProcessContext context, final ProcessSessionFactory sessionFactory, final ComponentLog log) throws Exception {
         final int maxConcurrentLeases = context.getMaxConcurrentTasks();
-        logger.debug("createConsumerPool: maxConcurrentLeases={}", new Object[]{maxConcurrentLeases});
         final long checkpointPeriodMs = context.getProperty(PROP_CHECKPOINT_PERIOD).asTimePeriod(TimeUnit.MILLISECONDS);
         final long checkpointTimeoutMs = context.getProperty(PROP_CHECKPOINT_TIMEOUT).asTimePeriod(TimeUnit.MILLISECONDS);
         final long gracefulShutdownTimeoutMs = context.getProperty(PROP_STOP_TIMEOUT).asTimePeriod(TimeUnit.MILLISECONDS);
         final long minimumProcessingTimeMs = context.getProperty(PROP_MINIMUM_PROCESSING_TIME).asTimePeriod(TimeUnit.MILLISECONDS);
-        final URI controllerURI = new URI(context.getProperty(PROP_CONTROLLER).getValue());
+        final ClientConfig clientConfig = getClientConfig(context);
         final String scope = context.getProperty(PROP_SCOPE).getValue();
         final String streamName = context.getProperty(PROP_STREAM).getValue();
         final StreamConfiguration streamConfig = getStreamConfiguration(context);
@@ -184,7 +184,7 @@ public class ConsumePravega extends AbstractPravegaProcessor {
                 checkpointTimeoutMs,
                 gracefulShutdownTimeoutMs,
                 minimumProcessingTimeMs,
-                controllerURI,
+                clientConfig,
                 scope,
                 streamNames,
                 streamConfig,

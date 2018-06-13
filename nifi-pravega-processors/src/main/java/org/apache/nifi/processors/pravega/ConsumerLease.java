@@ -16,6 +16,7 @@
  */
 package org.apache.nifi.processors.pravega;
 
+import io.pravega.client.ClientConfig;
 import io.pravega.client.stream.EventRead;
 import io.pravega.client.stream.EventStreamReader;
 import io.pravega.client.stream.ReinitializationRequiredException;
@@ -27,10 +28,9 @@ import org.apache.nifi.serialization.RecordReaderFactory;
 import org.apache.nifi.serialization.RecordSetWriterFactory;
 
 import java.io.Closeable;
-import java.net.URI;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.*;
+import java.util.concurrent.TimeoutException;
 
 import static org.apache.nifi.processors.pravega.ConsumePravega.REL_SUCCESS;
 import static org.apache.nifi.processors.pravega.ConsumerPool.CHECKPOINT_NAME_FINAL_PREFIX;
@@ -44,7 +44,7 @@ import static org.apache.nifi.processors.pravega.ConsumerPool.CHECKPOINT_NAME_FI
  */
 public abstract class ConsumerLease implements Closeable {
 
-    private final URI controllerURI;
+    private final ClientConfig clientConfig;
     protected final EventStreamReader<byte[]> reader;
     protected final String readerId;
     private final long checkpointTimeoutMs;// = 10000;
@@ -57,7 +57,7 @@ public abstract class ConsumerLease implements Closeable {
     private boolean lastCheckpointIsFinal = false;
 
     ConsumerLease(
-            final URI controllerURI,
+            final ClientConfig clientConfig,
             final EventStreamReader<byte[]> reader,
             final String readerId,
             final long checkpointTimeoutMs,
@@ -65,7 +65,7 @@ public abstract class ConsumerLease implements Closeable {
             final RecordReaderFactory readerFactory,
             final RecordSetWriterFactory writerFactory,
             final ComponentLog logger) {
-        this.controllerURI = controllerURI;
+        this.clientConfig = clientConfig;
         this.reader = reader;
         this.readerId = readerId;
         this.checkpointTimeoutMs = checkpointTimeoutMs;
@@ -84,7 +84,7 @@ public abstract class ConsumerLease implements Closeable {
 
     public String getConfigAsString() {
         return "ConsumerLease{" +
-                "controllerURI=" + controllerURI +
+                "clientConfig=" + clientConfig +
                 ", readerId='" + readerId + '\'' +
                 ", checkpointTimeoutMs=" + checkpointTimeoutMs +
                 ", minimumProcessingTimeMs=" + minimumProcessingTimeMs +
@@ -237,7 +237,7 @@ public abstract class ConsumerLease implements Closeable {
             });
         }
         flowFile = session.putAllAttributes(flowFile, getAttributes(eventRead));
-        final String transitUri = String.format("%s/%s", controllerURI, eventRead.getEventPointer());
+        final String transitUri = String.format("%s/%s", clientConfig.getControllerURI(), eventRead.getEventPointer());
         session.getProvenanceReporter().receive(flowFile, transitUri);
         session.transfer(flowFile, REL_SUCCESS);
     }

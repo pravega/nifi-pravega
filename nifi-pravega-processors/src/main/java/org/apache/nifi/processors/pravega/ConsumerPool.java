@@ -16,6 +16,7 @@
  */
 package org.apache.nifi.processors.pravega;
 
+import io.pravega.client.ClientConfig;
 import io.pravega.client.ClientFactory;
 import io.pravega.client.admin.ReaderGroupManager;
 import io.pravega.client.admin.StreamManager;
@@ -33,7 +34,6 @@ import org.apache.nifi.processor.ProcessSessionFactory;
 import org.apache.nifi.serialization.RecordReaderFactory;
 import org.apache.nifi.serialization.RecordSetWriterFactory;
 
-import java.net.URI;
 import java.nio.ByteBuffer;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
@@ -55,10 +55,11 @@ public class ConsumerPool implements AutoCloseable {
 
     private final BlockingQueue<SimpleConsumerLease> pooledLeases;      // must have lock on activeLeases to access
     private final Set<SimpleConsumerLease> activeLeases = new HashSet<>();
-    private final URI controllerURI;
+    private final ClientConfig clientConfig;
     private final String scope;
     private final List<String> streamNames;
     final StreamConfiguration streamConfig;
+    private final int maxConcurrentLeases;
     private final long checkpointPeriodMs;
     private final long checkpointTimeoutMs;
     private final long gracefulShutdownTimeoutMs;
@@ -108,7 +109,7 @@ public class ConsumerPool implements AutoCloseable {
             final long checkpointTimeoutMs,
             final long gracefulShutdownTimeoutMs,
             final long minimumProcessingTimeMs,
-            final URI controllerURI,
+            final ClientConfig clientConfig,
             final String scope,
             final List<String> streamNames,
             final StreamConfiguration streamConfig,
@@ -119,11 +120,12 @@ public class ConsumerPool implements AutoCloseable {
         this.stateManager = stateManager;
         this.sessionFactory = sessionFactory;
         this.isPrimaryNode = isPrimaryNode;
+        this.maxConcurrentLeases = maxConcurrentLeases;
         this.checkpointPeriodMs = checkpointPeriodMs;
         this.checkpointTimeoutMs = checkpointTimeoutMs;
         this.gracefulShutdownTimeoutMs = gracefulShutdownTimeoutMs;
         this.minimumProcessingTimeMs = minimumProcessingTimeMs;
-        this.controllerURI = controllerURI;
+        this.clientConfig = clientConfig;
         this.scope = scope;
         this.streamNames = Collections.unmodifiableList(streamNames);
         this.streamConfig = streamConfig;
@@ -142,14 +144,14 @@ public class ConsumerPool implements AutoCloseable {
         }
 
         pooledLeases = new ArrayBlockingQueue<>(maxConcurrentLeases);
-        clientFactory = ClientFactory.withScope(scope, controllerURI);
+        clientFactory = ClientFactory.withScope(scope, clientConfig);
         try {
             performCheckpointExecutor = Executors.newScheduledThreadPool(1);
             try {
                 initiateCheckpointExecutor = Executors.newScheduledThreadPool(1);
                 try {
                     // Create reader group manager.
-                    readerGroupManager = ReaderGroupManager.withScope(scope, controllerURI);
+                    readerGroupManager = ReaderGroupManager.withScope(scope, clientConfig);
                     try {
                         if (haveReaderGroup) {
                             // Use the reader group from the previous state.
@@ -168,7 +170,7 @@ public class ConsumerPool implements AutoCloseable {
                             // This processor is starting for the first time on the primary node.
 
                             // Create streams.
-                            try (final StreamManager streamManager = StreamManager.create(controllerURI)) {
+                            try (final StreamManager streamManager = StreamManager.create(clientConfig)) {
                                 streamManager.createScope(scope);
                                 for (String streamName : streamNames) {
                                     streamManager.createStream(scope, streamName, streamConfig);
@@ -239,7 +241,8 @@ public class ConsumerPool implements AutoCloseable {
 
     public String getConfigAsString() {
         return "ConsumerPool{" +
-                "controllerURI=" + controllerURI +
+                "clientConfig=" + clientConfig +
+                ", maxConcurrentLeases=" + maxConcurrentLeases +
                 ", scope='" + scope + '\'' +
                 ", streamNames=" + streamNames +
                 ", streamConfig=" + streamConfig +
@@ -489,7 +492,7 @@ public class ConsumerPool implements AutoCloseable {
 
         private SimpleConsumerLease(final EventStreamReader<byte[]> reader, final String readerId) {
             super(
-                    controllerURI,
+                    clientConfig,
                     reader,
                     readerId,
                     checkpointTimeoutMs,
