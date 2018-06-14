@@ -6,9 +6,9 @@ Connectors to read and write [Pravega](http://pravega.io/) streams with [Apache 
 
 ![PublishPravega-Configure](images/PublishPravega-Configure.png)
 
-![PublishPravega-Overview](images/ConsumePravega-Overview.png)
+![ConsumePravega-Overview](images/ConsumePravega-Overview.png)
 
-![PublishPravega-Configure](images/ConsumePravega-Configure.png)
+![ConsumePravega-Configure](images/ConsumePravega-Configure.png)
 
 
 ## Processors
