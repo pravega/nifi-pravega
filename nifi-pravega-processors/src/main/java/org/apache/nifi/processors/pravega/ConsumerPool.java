@@ -11,11 +11,10 @@
 package org.apache.nifi.processors.pravega;
 
 import io.pravega.client.ClientConfig;
-import io.pravega.client.ClientFactory;
+import io.pravega.client.EventStreamClientFactory;
 import io.pravega.client.admin.ReaderGroupManager;
+import io.pravega.client.admin.StreamInfo;
 import io.pravega.client.admin.StreamManager;
-import io.pravega.client.batch.BatchClient;
-import io.pravega.client.batch.StreamInfo;
 import io.pravega.client.stream.*;
 import io.pravega.client.stream.impl.ByteArraySerializer;
 import org.apache.nifi.components.state.Scope;
@@ -65,7 +64,6 @@ public class ConsumerPool implements AutoCloseable {
     private final AtomicLong consumerClosedCountRef = new AtomicLong();
     private final AtomicLong leasesObtainedCountRef = new AtomicLong();
     private final String readerGroupName;
-    private final ClientFactory clientFactory;
     private final ReaderGroupManager readerGroupManager;
     private final ReaderGroup readerGroup;
     private final ScheduledExecutorService performCheckpointExecutor;
@@ -136,37 +134,34 @@ public class ConsumerPool implements AutoCloseable {
         }
 
         pooledLeases = new ArrayBlockingQueue<>(maxConcurrentLeases);
-        clientFactory = ClientFactory.withScope(scope, clientConfig);
+        performCheckpointExecutor = Executors.newScheduledThreadPool(1);
         try {
-            performCheckpointExecutor = Executors.newScheduledThreadPool(1);
+            initiateCheckpointExecutor = Executors.newScheduledThreadPool(1);
             try {
-                initiateCheckpointExecutor = Executors.newScheduledThreadPool(1);
+                // Create reader group manager.
+                readerGroupManager = ReaderGroupManager.withScope(scope, clientConfig);
                 try {
-                    // Create reader group manager.
-                    readerGroupManager = ReaderGroupManager.withScope(scope, clientConfig);
-                    try {
-                        if (haveReaderGroup) {
-                            // Use the reader group from the previous state.
-                            logger.debug("ConsumerPool: previous state={}", new Object[]{stateMap.toMap()});
-                            final String prevReaderGroupName = stateMap.get(STATE_KEY_READER_GROUP);
-                            if (prevReaderGroupName == null || prevReaderGroupName.isEmpty()) {
-                                throw new Exception("State is missing the reader group name.");
-                            }
-                            readerGroupName = prevReaderGroupName;
-                            logger.debug("ConsumerPool: Using existing reader group {}", new Object[]{readerGroupName});
-                            readerGroup = readerGroupManager.getReaderGroup(readerGroupName);
-                        } else {
-                            if (!primaryNode) {
-                                throw new RuntimeException("bug");
-                            }
-                            // This processor is starting for the first time on the primary node.
+                    if (haveReaderGroup) {
+                        // Use the reader group from the previous state.
+                        logger.debug("ConsumerPool: previous state={}", new Object[]{stateMap.toMap()});
+                        final String prevReaderGroupName = stateMap.get(STATE_KEY_READER_GROUP);
+                        if (prevReaderGroupName == null || prevReaderGroupName.isEmpty()) {
+                            throw new Exception("State is missing the reader group name.");
+                        }
+                        readerGroupName = prevReaderGroupName;
+                        logger.debug("ConsumerPool: Using existing reader group {}", new Object[]{readerGroupName});
+                        readerGroup = readerGroupManager.getReaderGroup(readerGroupName);
+                    } else {
+                        if (!primaryNode) {
+                            throw new RuntimeException("bug");
+                        }
+                        // This processor is starting for the first time on the primary node.
 
-                            // Create streams.
-                            try (final StreamManager streamManager = StreamManager.create(clientConfig)) {
-                                for (Stream stream : streams) {
-                                    streamManager.createScope(stream.getScope());
-                                    streamManager.createStream(stream.getScope(), stream.getStreamName(), streamConfig);
-                                }
+                        // Create streams.
+                        try (final StreamManager streamManager = StreamManager.create(clientConfig)) {
+                            for (Stream stream : streams) {
+                                streamManager.createScope(stream.getScope());
+                                streamManager.createStream(stream.getScope(), stream.getStreamName(), streamConfig);
                             }
 
                             // Create reader group.
@@ -182,9 +177,8 @@ public class ConsumerPool implements AutoCloseable {
                                 // Determine starting stream cuts.
                                 final Map<Stream, StreamCut> startingStreamCuts = new HashMap<>();
                                 if (streamCutMethod.equals(STREAM_CUT_LATEST.getValue())) {
-                                    final BatchClient batchClient = clientFactory.createBatchClient();
                                     for (Stream stream : streams) {
-                                        StreamInfo streamInfo = batchClient.getStreamInfo(stream).join();
+                                        StreamInfo streamInfo = streamManager.getStreamInfo(stream.getScope(), stream.getStreamName());
                                         StreamCut tailStreamCut = streamInfo.getTailStreamCut();
                                         startingStreamCuts.put(stream, tailStreamCut);
                                     }
@@ -202,20 +196,17 @@ public class ConsumerPool implements AutoCloseable {
                             readerGroupManager.createReaderGroup(readerGroupName, readerGroupConfig);
                             readerGroup = readerGroupManager.getReaderGroup(readerGroupName);
                         }
-                    } catch (Exception e) {
-                        readerGroupManager.close();
-                        throw e;
                     }
                 } catch (Exception e) {
-                    initiateCheckpointExecutor.shutdown();
+                    readerGroupManager.close();
                     throw e;
                 }
             } catch (Exception e) {
-                performCheckpointExecutor.shutdown();
+                initiateCheckpointExecutor.shutdown();
                 throw e;
             }
         } catch (Exception e) {
-            clientFactory.close();
+            performCheckpointExecutor.shutdown();
             throw e;
         }
 
@@ -416,7 +407,7 @@ public class ConsumerPool implements AutoCloseable {
      */
     protected EventStreamReader<byte[]> createPravegaReader(final String readerId) {
         logger.debug("createPravegaReader: readerId={}", new Object[]{readerId});
-        final EventStreamReader<byte[]> reader = clientFactory.createReader(
+        final EventStreamReader<byte[]> reader = EventStreamClientFactory.withScope(scope, clientConfig).createReader(
                 readerId,
                 readerGroupName,
                 new ByteArraySerializer(),
@@ -447,7 +438,6 @@ public class ConsumerPool implements AutoCloseable {
         }
         readerGroup.close();
         readerGroupManager.close();
-        clientFactory.close();
     }
 
     private void closeReader(final EventStreamReader<byte[]> reader) {

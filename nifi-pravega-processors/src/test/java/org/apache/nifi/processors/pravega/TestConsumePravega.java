@@ -10,7 +10,8 @@
  */
 package org.apache.nifi.processors.pravega;
 
-import io.pravega.client.ClientFactory;
+import io.pravega.client.ClientConfig;
+import io.pravega.client.EventStreamClientFactory;
 import io.pravega.client.admin.ReaderGroupManager;
 import io.pravega.client.admin.StreamManager;
 import io.pravega.client.stream.*;
@@ -49,7 +50,8 @@ public class TestConsumePravega {
         }
 
         // Write some data to the stream.
-        try (final ClientFactory clientFactory = ClientFactory.withScope(scope, controllerURI)) {
+        ClientConfig clientConfig = ClientConfig.builder().controllerURI(controllerURI).build();
+        try (final EventStreamClientFactory clientFactory = EventStreamClientFactory.withScope(scope, clientConfig)) {
             try (final EventStreamWriter<byte[]> writer = clientFactory.createEventWriter(
                     streamName,
                     new ByteArraySerializer(),
@@ -69,19 +71,19 @@ public class TestConsumePravega {
         }
 
         // Start reader and leader threads.
-        Thread readerThread = new Thread(() -> ReaderThread(controllerURI, scope, readerGroupName));
+        Thread readerThread = new Thread(() -> ReaderThread(clientConfig, scope, readerGroupName));
         readerThread.start();
 
         // Wait for reader to read first event.
         Thread.sleep(1000);
 
-        Thread leaderThread = new Thread(() -> LeaderThread(controllerURI, scope, readerGroupName));
+        Thread leaderThread = new Thread(() -> LeaderThread(clientConfig, scope, readerGroupName));
         leaderThread.start();
 
         leaderThread.join();
 
         // Write some data to the stream.
-        try (final ClientFactory clientFactory = ClientFactory.withScope(scope, controllerURI)) {
+        try (final EventStreamClientFactory clientFactory = EventStreamClientFactory.withScope(scope, clientConfig)) {
             try (final EventStreamWriter<byte[]> writer = clientFactory.createEventWriter(
                     streamName,
                     new ByteArraySerializer(),
@@ -94,10 +96,10 @@ public class TestConsumePravega {
         log.info("DONE");
     }
 
-    void LeaderThread(URI controllerURI, String scope, String readerGroupName) {
+    void LeaderThread(ClientConfig clientConfig, String scope, String readerGroupName) {
         log.info("LeaderThread: BEGIN; this={}", System.identityHashCode(this));
         try {
-            try (ReaderGroupManager readerGroupManager = ReaderGroupManager.withScope(scope, controllerURI)) {
+            try (ReaderGroupManager readerGroupManager = ReaderGroupManager.withScope(scope, clientConfig)) {
                 try (final ReaderGroup readerGroup = readerGroupManager.getReaderGroup(readerGroupName)) {
                     final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
                     final String checkpointName = UUID.randomUUID().toString();
@@ -117,10 +119,10 @@ public class TestConsumePravega {
         log.info("LeaderThread: END");
     }
 
-    void ReaderThread(URI controllerURI, String scope, String readerGroupName) {
+    void ReaderThread(ClientConfig clientConfig, String scope, String readerGroupName) {
         try {
             final String readerId = "readerId1";
-            try (final ClientFactory clientFactory = ClientFactory.withScope(scope, controllerURI)) {
+            try (final EventStreamClientFactory clientFactory = EventStreamClientFactory.withScope(scope, clientConfig)) {
                 try (final EventStreamReader<byte[]> reader = clientFactory.createReader(
                         readerId,
                         readerGroupName,
