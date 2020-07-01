@@ -10,8 +10,8 @@
  */
 package org.apache.nifi.processors.pravega;
 
-import io.pravega.client.stream.EventStreamWriter;
 import io.pravega.client.stream.Transaction;
+import io.pravega.client.stream.TransactionalEventStreamWriter;
 import io.pravega.client.stream.TxnFailedException;
 import org.apache.nifi.annotation.behavior.EventDriven;
 import org.apache.nifi.annotation.behavior.InputRequirement;
@@ -114,7 +114,7 @@ public class PublishPravegaRecord extends AbstractPravegaPublisher {
         final String streamName = context.getProperty(PROP_STREAM).getValue();
         final String transitUri = buildTransitURI(controller, scope, streamName);
         final long startTime = System.nanoTime();
-        final EventStreamWriter<byte[]> writer = getWriter(context);
+        final TransactionalEventStreamWriter<byte[]> writer = getWriter(context);
         final Transaction<byte[]> transaction = writer.beginTxn();
         final UUID txnId = transaction.getTxnId();
 

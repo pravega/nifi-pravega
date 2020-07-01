@@ -46,7 +46,7 @@ You may obtain a copy of the License at
         <dependency>
             <groupId>io.pravega</groupId>
             <artifactId>pravega-client</artifactId>
-            <version>0.3.0-1881.87e70f7-SNAPSHOT</version>
+            <version>0.7.1</version>
         </dependency>
         <dependency>
             <groupId>org.apache.nifi</groupId>
