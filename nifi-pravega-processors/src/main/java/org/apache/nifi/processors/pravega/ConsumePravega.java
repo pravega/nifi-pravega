@@ -194,6 +194,7 @@ public class ConsumePravega extends AbstractPravegaProcessor {
         final long gracefulShutdownTimeoutMs = context.getProperty(PROP_STOP_TIMEOUT).asTimePeriod(TimeUnit.MILLISECONDS);
         final long minimumProcessingTimeMs = context.getProperty(PROP_MINIMUM_PROCESSING_TIME).asTimePeriod(TimeUnit.MILLISECONDS);
         final String streamCutMethod = context.getProperty(PROP_STREAM_CUT_METHOD).getValue();
+        final boolean localPravega = new Boolean(context.getProperty(PROP_LOCAL_PRAVEGA).getValue()).booleanValue();
         return new ConsumerPool(
                 log,
                 context.getStateManager(),
@@ -209,7 +210,8 @@ public class ConsumePravega extends AbstractPravegaProcessor {
                 streamConfig,
                 streamCutMethod,
                 null,
-                null);
+                null,
+                localPravega);
     }
 
     @Override
@@ -243,6 +245,7 @@ public class ConsumePravega extends AbstractPravegaProcessor {
             logger.info("onTrigger: ProcessorNotReadyException", new Object[]{e});
             context.yield();
         } catch (final Exception e) {
+            e.printStackTrace();
             throw new RuntimeException(e);
         }
         logger.debug("onTrigger: END");

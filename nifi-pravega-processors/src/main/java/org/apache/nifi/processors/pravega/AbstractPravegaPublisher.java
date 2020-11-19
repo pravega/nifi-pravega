@@ -70,12 +70,15 @@ public abstract class AbstractPravegaPublisher extends AbstractPravegaProcessor 
             logger.debug("getWriter: this={}", new Object[]{System.identityHashCode(this)});
             if (cachedWriter == null) {
                 ClientConfig clientConfig = getClientConfig(context);
+
                 final Stream stream = getStream(context);
                 logger.debug("getWriter: stream={}, this={}",
                         new Object[]{stream, System.identityHashCode(this)});
                 final StreamConfiguration streamConfig = getStreamConfiguration(context);
                 try (final StreamManager streamManager = StreamManager.create(clientConfig)) {
-                    streamManager.createScope(stream.getScope());
+                    if(new Boolean(context.getProperty(PROP_LOCAL_PRAVEGA).getValue()))
+                        streamManager.createScope(stream.getScope());
+
                     streamManager.createStream(stream.getScope(), stream.getStreamName(), streamConfig);
                 }
                 final EventStreamClientFactory clientFactory = EventStreamClientFactory.withScope(stream.getScope(), clientConfig);

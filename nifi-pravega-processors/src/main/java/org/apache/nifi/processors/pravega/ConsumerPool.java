@@ -46,12 +46,17 @@ import static org.apache.nifi.processors.pravega.ConsumePravega.STREAM_CUT_LATES
  */
 public class ConsumerPool implements AutoCloseable {
 
+    static final String CHECKPOINT_NAME_FINAL_PREFIX = "FINAL-";
+    static private final String STATE_KEY_READER_GROUP = "reader.group.name";
+    static private final String STATE_KEY_CHECKPOINT_NAME = "reader.group.checkpoint.name";
+    static private final String STATE_KEY_CHECKPOINT_BASE64 = "reader.group.checkpoint.base64";
+    static private final String STATE_KEY_CHECKPOINT_TIME = "reader.group.checkpoint.time";
+    final StreamConfiguration streamConfig;
     private final BlockingQueue<SimpleConsumerLease> pooledLeases;      // must have lock on activeLeases to access
     private final Set<SimpleConsumerLease> activeLeases = new HashSet<>();
     private final ClientConfig clientConfig;
     private final String scope;
     private final List<Stream> streams;
-    final StreamConfiguration streamConfig;
     private final int maxConcurrentLeases;
     private final long checkpointPeriodMs;
     private final long checkpointTimeoutMs;
@@ -72,13 +77,7 @@ public class ConsumerPool implements AutoCloseable {
     private final ProcessSessionFactory sessionFactory;
     private final Supplier<Boolean> isPrimaryNode;
     private final Object checkpointMutex = new Object();
-
-    static private final String STATE_KEY_READER_GROUP = "reader.group.name";
-    static private final String STATE_KEY_CHECKPOINT_NAME = "reader.group.checkpoint.name";
-    static private final String STATE_KEY_CHECKPOINT_BASE64 = "reader.group.checkpoint.base64";
-    static private final String STATE_KEY_CHECKPOINT_TIME = "reader.group.checkpoint.time";
-
-    static final String CHECKPOINT_NAME_FINAL_PREFIX = "FINAL-";
+    private final boolean localPravega;
 
     /**
      * Creates a pool of Pravega reader objects that will grow up to the maximum
@@ -88,7 +87,7 @@ public class ConsumerPool implements AutoCloseable {
      * below a certain threshold.
      *
      * @param maxConcurrentLeases max allowable consumers at once
-     * @param logger the logger to report any errors/warnings
+     * @param logger              the logger to report any errors/warnings
      */
     public ConsumerPool(
             final ComponentLog logger,
@@ -105,7 +104,8 @@ public class ConsumerPool implements AutoCloseable {
             final StreamConfiguration streamConfig,
             final String streamCutMethod,
             final RecordReaderFactory readerFactory,
-            final RecordSetWriterFactory writerFactory) throws Exception {
+            final RecordSetWriterFactory writerFactory,
+            final boolean localPravega) throws Exception {
         this.logger = logger;
         this.stateManager = stateManager;
         this.sessionFactory = sessionFactory;
@@ -121,6 +121,7 @@ public class ConsumerPool implements AutoCloseable {
         this.streamConfig = streamConfig;
         this.readerFactory = readerFactory;
         this.writerFactory = writerFactory;
+        this.localPravega = localPravega;
 
         final boolean primaryNode = isPrimaryNode.get();
         final StateMap stateMap = stateManager.getState(Scope.CLUSTER);
@@ -160,7 +161,9 @@ public class ConsumerPool implements AutoCloseable {
                         // Create streams.
                         try (final StreamManager streamManager = StreamManager.create(clientConfig)) {
                             for (Stream stream : streams) {
-                                streamManager.createScope(stream.getScope());
+                                if (localPravega)
+                                    streamManager.createScope(stream.getScope());
+
                                 streamManager.createStream(stream.getScope(), stream.getStreamName(), streamConfig);
                             }
 
@@ -169,10 +172,12 @@ public class ConsumerPool implements AutoCloseable {
                             logger.debug("ConsumerPool: Using new reader group {}", new Object[]{readerGroupName});
                             ReaderGroupConfig.ReaderGroupConfigBuilder builder = ReaderGroupConfig.builder()
                                     .disableAutomaticCheckpoints();
+                            logger.debug("ConsumerPool: ReaderGroupConfigBuilder {}", new Object[]{builder});
                             if (haveCheckpoint) {
                                 logger.debug("ConsumerPool: Starting the reader group from checkpoint {}", new Object[]{checkpointStr});
                                 final Checkpoint checkpoint = Checkpoint.fromBytes(ByteBuffer.wrap(Base64.getDecoder().decode(checkpointStr)));
                                 builder = builder.startFromCheckpoint(checkpoint);
+                                logger.debug("ConsumerPool: Inside If(haveCheckpoint) ReaderGroupConfigBuilder {}", new Object[]{builder});
                             } else {
                                 // Determine starting stream cuts.
                                 final Map<Stream, StreamCut> startingStreamCuts = new HashMap<>();
@@ -198,14 +203,17 @@ public class ConsumerPool implements AutoCloseable {
                         }
                     }
                 } catch (Exception e) {
+                    e.printStackTrace();
                     readerGroupManager.close();
                     throw e;
                 }
             } catch (Exception e) {
+                e.printStackTrace();
                 initiateCheckpointExecutor.shutdown();
                 throw e;
             }
         } catch (Exception e) {
+            e.printStackTrace();
             performCheckpointExecutor.shutdown();
             throw e;
         }
@@ -284,16 +292,15 @@ public class ConsumerPool implements AutoCloseable {
      * represent exactly what each thread on each node committed to each session.
      * If any checkpoint is in progress, then it is possible for some threads to already have committed their session.
      * Therefore, if any checkpoint is in progress, we want to wait for it and ensure that another one does not start.
-     *
+     * <p>
      * When the primary cluster node is shut down, it is no longer the primary node when this method is called.
-     *
+     * <p>
      * Note that this is called by onUnscheduled which is called when the user stops the processor.
      * However, it is also called when a NiFi node is stopped in a cluster, in which case we actually
      * want the other nodes to continue running. So we want this method to perform everything needed
      * for a graceful shutdown but to allow other nodes to continue using the reader group.
      * Therefore, the reader group is not deleted by this processor.
      * Instead it should be cleaned up periodically by Pravega.
-     *
      */
     public void gracefulShutdown(final ProcessContext context) {
         logger.debug("gracefulShutdown: BEGIN");
@@ -361,10 +368,10 @@ public class ConsumerPool implements AutoCloseable {
      * Obtains a consumer from the pool if one is available or lazily
      * initializes a new one if deemed necessary.
      *
-     * @param session the session for which the consumer lease will be
-     *            associated
+     * @param session        the session for which the consumer lease will be
+     *                       associated
      * @param processContext the ProcessContext for which the consumer
-     *            lease will be associated
+     *                       lease will be associated
      * @return consumer to use or null if not available or necessary
      */
     public ConsumerLease obtainConsumer(final ProcessSession session, final ProcessContext processContext) {
@@ -453,6 +460,31 @@ public class ConsumerPool implements AutoCloseable {
         return new PoolStats(consumerCreatedCountRef.get(), consumerClosedCountRef.get(), leasesObtainedCountRef.get());
     }
 
+    static final class PoolStats {
+
+        final long consumerCreatedCount;
+        final long consumerClosedCount;
+        final long leasesObtainedCount;
+
+        PoolStats(
+                final long consumerCreatedCount,
+                final long consumerClosedCount,
+                final long leasesObtainedCount
+        ) {
+            this.consumerCreatedCount = consumerCreatedCount;
+            this.consumerClosedCount = consumerClosedCount;
+            this.leasesObtainedCount = leasesObtainedCount;
+        }
+
+        @Override
+        public String toString() {
+            return "Created Consumers [" + consumerCreatedCount + "]\n"
+                    + "Closed Consumers  [" + consumerClosedCount + "]\n"
+                    + "Leases Obtained   [" + leasesObtainedCount + "]\n";
+        }
+
+    }
+
     private class SimpleConsumerLease extends ConsumerLease {
 
         private volatile ProcessSession session;
@@ -516,31 +548,6 @@ public class ConsumerPool implements AutoCloseable {
                 logger.debug("SimpleConsumerLease.close: Reader {} closed", new Object[]{readerId});
             }
         }
-    }
-
-    static final class PoolStats {
-
-        final long consumerCreatedCount;
-        final long consumerClosedCount;
-        final long leasesObtainedCount;
-
-        PoolStats(
-                final long consumerCreatedCount,
-                final long consumerClosedCount,
-                final long leasesObtainedCount
-        ) {
-            this.consumerCreatedCount = consumerCreatedCount;
-            this.consumerClosedCount = consumerClosedCount;
-            this.leasesObtainedCount = leasesObtainedCount;
-        }
-
-        @Override
-        public String toString() {
-            return "Created Consumers [" + consumerCreatedCount + "]\n"
-                    + "Closed Consumers  [" + consumerClosedCount + "]\n"
-                    + "Leases Obtained   [" + leasesObtainedCount + "]\n";
-        }
-
     }
 
 }
