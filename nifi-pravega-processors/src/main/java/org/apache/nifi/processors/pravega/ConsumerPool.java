@@ -77,7 +77,7 @@ public class ConsumerPool implements AutoCloseable {
     private final ProcessSessionFactory sessionFactory;
     private final Supplier<Boolean> isPrimaryNode;
     private final Object checkpointMutex = new Object();
-    private final boolean localPravega;
+    private final boolean createScope;
 
     /**
      * Creates a pool of Pravega reader objects that will grow up to the maximum
@@ -105,7 +105,7 @@ public class ConsumerPool implements AutoCloseable {
             final String streamCutMethod,
             final RecordReaderFactory readerFactory,
             final RecordSetWriterFactory writerFactory,
-            final boolean localPravega) throws Exception {
+            final boolean createScope) throws Exception {
         this.logger = logger;
         this.stateManager = stateManager;
         this.sessionFactory = sessionFactory;
@@ -121,7 +121,7 @@ public class ConsumerPool implements AutoCloseable {
         this.streamConfig = streamConfig;
         this.readerFactory = readerFactory;
         this.writerFactory = writerFactory;
-        this.localPravega = localPravega;
+        this.createScope = createScope;
 
         final boolean primaryNode = isPrimaryNode.get();
         final StateMap stateMap = stateManager.getState(Scope.CLUSTER);
@@ -161,7 +161,7 @@ public class ConsumerPool implements AutoCloseable {
                         // Create streams.
                         try (final StreamManager streamManager = StreamManager.create(clientConfig)) {
                             for (Stream stream : streams) {
-                                if (localPravega)
+                                if (createScope)
                                     streamManager.createScope(stream.getScope());
 
                                 streamManager.createStream(stream.getScope(), stream.getStreamName(), streamConfig);
@@ -172,12 +172,11 @@ public class ConsumerPool implements AutoCloseable {
                             logger.debug("ConsumerPool: Using new reader group {}", new Object[]{readerGroupName});
                             ReaderGroupConfig.ReaderGroupConfigBuilder builder = ReaderGroupConfig.builder()
                                     .disableAutomaticCheckpoints();
-                            logger.debug("ConsumerPool: ReaderGroupConfigBuilder {}", new Object[]{builder});
+
                             if (haveCheckpoint) {
                                 logger.debug("ConsumerPool: Starting the reader group from checkpoint {}", new Object[]{checkpointStr});
                                 final Checkpoint checkpoint = Checkpoint.fromBytes(ByteBuffer.wrap(Base64.getDecoder().decode(checkpointStr)));
                                 builder = builder.startFromCheckpoint(checkpoint);
-                                logger.debug("ConsumerPool: Inside If(haveCheckpoint) ReaderGroupConfigBuilder {}", new Object[]{builder});
                             } else {
                                 // Determine starting stream cuts.
                                 final Map<Stream, StreamCut> startingStreamCuts = new HashMap<>();
@@ -203,17 +202,14 @@ public class ConsumerPool implements AutoCloseable {
                         }
                     }
                 } catch (Exception e) {
-                    e.printStackTrace();
                     readerGroupManager.close();
                     throw e;
                 }
             } catch (Exception e) {
-                e.printStackTrace();
                 initiateCheckpointExecutor.shutdown();
                 throw e;
             }
         } catch (Exception e) {
-            e.printStackTrace();
             performCheckpointExecutor.shutdown();
             throw e;
         }

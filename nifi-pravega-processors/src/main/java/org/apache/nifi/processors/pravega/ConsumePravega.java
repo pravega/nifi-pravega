@@ -194,7 +194,7 @@ public class ConsumePravega extends AbstractPravegaProcessor {
         final long gracefulShutdownTimeoutMs = context.getProperty(PROP_STOP_TIMEOUT).asTimePeriod(TimeUnit.MILLISECONDS);
         final long minimumProcessingTimeMs = context.getProperty(PROP_MINIMUM_PROCESSING_TIME).asTimePeriod(TimeUnit.MILLISECONDS);
         final String streamCutMethod = context.getProperty(PROP_STREAM_CUT_METHOD).getValue();
-        final boolean localPravega = new Boolean(context.getProperty(PROP_LOCAL_PRAVEGA).getValue()).booleanValue();
+        final boolean createScope = new Boolean(context.getProperty(PROP_CREATE_SCOPE).getValue()).booleanValue();
         return new ConsumerPool(
                 log,
                 context.getStateManager(),
@@ -211,7 +211,7 @@ public class ConsumePravega extends AbstractPravegaProcessor {
                 streamCutMethod,
                 null,
                 null,
-                localPravega);
+                createScope);
     }
 
     @Override
@@ -242,10 +242,10 @@ public class ConsumePravega extends AbstractPravegaProcessor {
             }
         } catch (final ProcessorNotReadyException e) {
             // This is an expected exception that occurs during startup of a non-primary node.
-            logger.info("onTrigger: ProcessorNotReadyException", new Object[]{e});
+            logger.error("onTrigger: ProcessorNotReadyException", new Object[]{e});
             context.yield();
         } catch (final Exception e) {
-            e.printStackTrace();
+            logger.error("onTrigger: Exception", new Object[]{e});
             throw new RuntimeException(e);
         }
         logger.debug("onTrigger: END");

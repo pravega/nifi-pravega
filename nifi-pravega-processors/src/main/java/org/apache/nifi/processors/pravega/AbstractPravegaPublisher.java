@@ -76,7 +76,7 @@ public abstract class AbstractPravegaPublisher extends AbstractPravegaProcessor 
                         new Object[]{stream, System.identityHashCode(this)});
                 final StreamConfiguration streamConfig = getStreamConfiguration(context);
                 try (final StreamManager streamManager = StreamManager.create(clientConfig)) {
-                    if(new Boolean(context.getProperty(PROP_LOCAL_PRAVEGA).getValue()))
+                    if(new Boolean(context.getProperty(PROP_CREATE_SCOPE).getValue()))
                         streamManager.createScope(stream.getScope());
 
                     streamManager.createStream(stream.getScope(), stream.getStreamName(), streamConfig);
