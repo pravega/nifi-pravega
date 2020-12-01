@@ -173,7 +173,7 @@ public abstract class AbstractPravegaProcessor extends AbstractSessionFactoryPro
                         .controllerURI(controllerURI)
                         .build();
             }
-            else if(!createScope && (context.getProperty(PROP_KEYCLOAK_JSON).getValue() != null))
+            else if(context.getProperty(PROP_KEYCLOAK_JSON).getValue() != null)
             {
                 clientBuilder.credentials(new PravegaKeycloakCredentialsFromString(context.getProperty(PROP_KEYCLOAK_JSON).getValue()));
                 clientConfig = clientBuilder.build();
