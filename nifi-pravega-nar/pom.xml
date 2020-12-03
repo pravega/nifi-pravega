@@ -18,7 +18,7 @@ You may obtain a copy of the License at
     </parent>
 
     <artifactId>nifi-pravega-nar</artifactId>
-    <version>0.1</version>
+    <version>0.2</version>
     <packaging>nar</packaging>
     <properties>
         <maven.javadoc.skip>true</maven.javadoc.skip>

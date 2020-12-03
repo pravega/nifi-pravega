@@ -14,6 +14,7 @@ import io.pravega.client.ClientConfig;
 import io.pravega.client.stream.ScalingPolicy;
 import io.pravega.client.stream.Stream;
 import io.pravega.client.stream.StreamConfiguration;
+import io.pravega.keycloak.client.PravegaKeycloakCredentials;
 import org.apache.nifi.components.*;
 import org.apache.nifi.controller.NodeTypeProvider;
 import org.apache.nifi.logging.ComponentLog;
@@ -127,6 +128,23 @@ public abstract class AbstractPravegaProcessor extends AbstractSessionFactoryPro
             .defaultValue("1")
             .build();
 
+    static final PropertyDescriptor PROP_KEYCLOAK_JSON = new PropertyDescriptor.Builder()
+            .name("keycloakJson")
+            .displayName("Keycloak Json")
+            .description("The Keycloak Json.")
+            .required(false)
+            .addValidator(StandardValidators.NON_BLANK_VALIDATOR)
+            .build();
+
+    static final PropertyDescriptor PROP_CREATE_SCOPE = new PropertyDescriptor.Builder()
+            .name("PROP_CREATE_SCOPE")
+            .displayName("Create Scope (true/false)")
+            .description("Create Scope or not.")
+            .required(true)
+            .addValidator(StandardValidators.NON_BLANK_VALIDATOR)
+            .build();
+
+
     static List<PropertyDescriptor> getAbstractPropertyDescriptors(){
         final List<PropertyDescriptor> descriptors = new ArrayList<PropertyDescriptor>();
         descriptors.add(PROP_CONTROLLER);
@@ -136,6 +154,8 @@ public abstract class AbstractPravegaProcessor extends AbstractSessionFactoryPro
         descriptors.add(PROP_SCALE_TARGET_RATE);
         descriptors.add(PROP_SCALE_FACTOR);
         descriptors.add(PROP_SCALE_MIN_NUM_SEGMENTS);
+        descriptors.add(PROP_KEYCLOAK_JSON);
+        descriptors.add(PROP_CREATE_SCOPE);
         return descriptors;
     }
 
@@ -143,11 +163,27 @@ public abstract class AbstractPravegaProcessor extends AbstractSessionFactoryPro
 
     public ClientConfig getClientConfig(final ProcessContext context) {
         try {
+            ClientConfig clientConfig = null;
+            boolean createScope = new Boolean(context.getProperty(PROP_CREATE_SCOPE).getValue()).booleanValue();
             final URI controllerURI = new URI(context.getProperty(PROP_CONTROLLER).getValue());
-            final ClientConfig clientConfig = ClientConfig.builder()
-                    .controllerURI(controllerURI)
-                    .build();
+            final ClientConfig.ClientConfigBuilder clientBuilder = ClientConfig.builder().controllerURI(controllerURI);
+            if(createScope)
+            {
+                clientConfig = ClientConfig.builder()
+                        .controllerURI(controllerURI)
+                        .build();
+            }
+            else if(context.getProperty(PROP_KEYCLOAK_JSON).getValue() != null)
+            {
+                clientBuilder.credentials(new PravegaKeycloakCredentialsFromString(context.getProperty(PROP_KEYCLOAK_JSON).getValue()));
+                clientConfig = clientBuilder.build();
+            } else if(context.getProperty(PROP_KEYCLOAK_JSON).getValue() == null || context.getProperty(PROP_KEYCLOAK_JSON).getValue().isEmpty())
+            {
+                logger.error("Keycloak json property not set");
+                throw new RuntimeException("Keycloak json property not set");
+            }
             return clientConfig;
+
         } catch (final URISyntaxException e) {
             throw new RuntimeException(e);
         }
