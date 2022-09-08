@@ -21,7 +21,7 @@ You may obtain a copy of the License at
     <packaging>jar</packaging>
 
     <properties>
-        <pravega.keycloak.version>0.8.0</pravega.keycloak.version>
+        <pravega.keycloak.version>0.11.0</pravega.keycloak.version>
     </properties>
 
     <repositories>
@@ -88,7 +88,7 @@ You may obtain a copy of the License at
         <dependency>
             <groupId>io.pravega</groupId>
             <artifactId>pravega-client</artifactId>
-            <version>0.8.0</version>
+            <version>0.11.0</version>
         </dependency>
         <dependency>
             <groupId>io.pravega</groupId>
